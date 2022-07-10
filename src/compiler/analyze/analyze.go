@@ -30,6 +30,20 @@ func Analyze(ctx context.Context, st *parse.State, x ast.Node) (y ir.Node, err e
 		}
 
 		return w, nil
+	case ast.Add:
+		s := ir.Sum{nil, nil}
+
+		s[0], err = Analyze(ctx, st, x.Left)
+		if err != nil {
+			return nil, errors.Wrap(err, "left")
+		}
+
+		s[1], err = Analyze(ctx, st, x.Right)
+		if err != nil {
+			return nil, errors.Wrap(err, "right")
+		}
+
+		return s, nil
 	default:
 		return nil, NewUnsupportedASTNode(x)
 	}

@@ -20,6 +20,8 @@ type (
 		Value uint64
 	}
 
+	Sum []Node
+
 	Addr struct {
 		Reg int16
 	}

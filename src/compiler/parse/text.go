@@ -1,33 +1,22 @@
 package parse
 
+import (
+	"bytes"
+	"context"
+
+	"github.com/nikandfor/errors"
+
+	"github.com/slowlang/slow/src/compiler/ast"
+)
+
 type (
-	Spaces uint64
+	Const []byte
 )
 
-var (
-	Space    = NewSpaces(' ')
-	SpaceTab = NewSpaces(' ', '\t')
-	SpaceAll = NewSpaces(' ', '\t', '\r', '\n')
-)
-
-func NewSpaces(skip ...byte) (ss Spaces) {
-	for _, q := range skip {
-		if q >= 64 {
-			panic("too high char code")
-		}
-
-		ss |= 1 << q
+func (p Const) Parse(ctx context.Context, b []byte, st int) (x ast.Node, i int, err error) {
+	if bytes.HasPrefix(b[st:], p) {
+		return Const(b[st : st+len(p)]), st + len(p), nil
 	}
 
-	return
-}
-
-func (s Spaces) Skip(p []byte, st int) (i int) {
-	i = st
-
-	for i < len(p) && p[i] < 64 && s&(1<<p[i]) != 0 {
-		i++
-	}
-
-	return
+	return nil, st, errors.New("%q expected", []byte(p))
 }

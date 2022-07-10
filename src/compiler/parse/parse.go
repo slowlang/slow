@@ -35,7 +35,7 @@ type (
 	}
 
 	PartialReadError struct {
-		End int
+		Pos int
 	}
 
 	stateCtxKey struct{}
@@ -59,8 +59,13 @@ func Parse(ctx context.Context, text []byte) (x ast.Node, err error) {
 }
 
 func New() *State {
+	var g Parser = LeftToRight{
+		Op:  Add{},
+		Arg: Int{},
+	}
+
 	return &State{
-		Grammar: &Int{},
+		Grammar: g,
 	}
 }
 
@@ -75,7 +80,7 @@ func (s *State) Parse(ctx context.Context) (x ast.Node, err error) {
 	i = SpaceAll.Skip(s.b, i)
 
 	if i != len(s.b) {
-		return x, PartialReadError{End: i}
+		return x, PartialReadError{Pos: i}
 	}
 
 	return x, nil
@@ -112,5 +117,5 @@ func (e TypeExpectedError) Error() string {
 }
 
 func (e PartialReadError) Error() string {
-	return fmt.Sprintf("partial read")
+	return fmt.Sprintf("partial read: (pos 0x%x)", e.Pos)
 }

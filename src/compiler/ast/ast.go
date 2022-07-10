@@ -6,6 +6,7 @@ type (
 
 	Base struct {
 		Pos int
+		End int
 	}
 
 	LineBreak struct {
@@ -14,13 +15,24 @@ type (
 
 	Ident struct {
 		Base `tlog:",embed"`
+	}
 
-		Name string
+	Token struct {
+		Base `tlog:",embed"`
 	}
 
 	Int struct {
 		Base `tlog:",embed"`
+	}
 
-		End int
+	Float struct {
+		Base `tlog:",embed"`
+	}
+
+	Add struct {
+		Base `tlog:",embed"`
+
+		Left  Node
+		Right Node
 	}
 )

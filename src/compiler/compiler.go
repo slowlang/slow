@@ -30,6 +30,7 @@ func Compile(ctx context.Context, name string, text []byte) (obj []byte, err err
 
 	x, err := st.Parse(ctx)
 	if err != nil {
+		tlog.SpanFromContext(ctx).Printw("abstract syntax tree", "x_type", tlog.FormatNext("%T"), x, "x", x, "err", err)
 		return nil, errors.Wrap(err, "parse text")
 	}
 
