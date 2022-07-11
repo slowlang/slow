@@ -2,6 +2,8 @@ package parse
 
 import (
 	"context"
+	"fmt"
+	"strings"
 
 	"github.com/nikandfor/errors"
 	"github.com/slowlang/slow/src/compiler/ast"
@@ -67,4 +69,66 @@ func (p Context) Parse(ctx context.Context, b []byte, st int) (x ast.Node, i int
 	}
 
 	return x, i, nil
+}
+
+func (p AllOf) Parse(ctx context.Context, b []byte, st int) (x ast.Node, i int, err error) {
+	i = st
+
+	res := make([]ast.Node, len(p))
+
+	for j, r := range p {
+		x, i, err = r.Parse(ctx, b, i)
+		if err != nil {
+			return nil, i, errors.Wrap(err, "%T (%d)", r, j)
+		}
+
+		res[j] = x
+	}
+
+	return res, i, nil
+}
+
+func (p AnyOf) Parse(ctx context.Context, b []byte, st int) (_ ast.Node, i int, err error) {
+	for _, r := range p {
+		x, j, e := r.Parse(ctx, b, st)
+		if e == nil {
+			return x, j, nil
+		}
+		if j == st {
+			continue
+		}
+		if err == nil {
+			i = j
+			err = errors.Wrap(e, "%T", r)
+		}
+	}
+
+	if err != nil {
+		return
+	}
+
+	return nil, st, errors.New("expected %v", joinHuman(p...))
+}
+
+func joinHuman(l ...Parser) string {
+	switch len(l) {
+	case 0:
+		return "<none>"
+	case 1:
+		return fmt.Sprintf("%T", l[0])
+	}
+
+	var b strings.Builder
+
+	for i, r := range l {
+		if i+1 == len(l) {
+			b.WriteString(" or ")
+		} else if i != 0 {
+			b.WriteString(", ")
+		}
+
+		fmt.Fprintf(&b, "%T", r)
+	}
+
+	return b.String()
 }

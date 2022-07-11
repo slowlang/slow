@@ -12,5 +12,5 @@ run_%: %.out
 	as -arch arm64 -o $@ $^
 
 .PRECIOUS: %.s
-%.s: %.slw Makefile $(wildcard ./cmd/slow/*.go) $(wildcard ./compiler/*.go) $(wildcard ./compiler/*/*.go)
+%.s: %.sl Makefile $(wildcard ./cmd/slow/*.go) $(wildcard ./compiler/*.go) $(wildcard ./compiler/*/*.go)
 	go run ./cmd/slow compile $< >$@

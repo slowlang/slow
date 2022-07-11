@@ -17,6 +17,10 @@ type (
 		Base `tlog:",embed"`
 	}
 
+	Type struct {
+		Base `tlog:",embed"`
+	}
+
 	Token struct {
 		Base `tlog:",embed"`
 	}
@@ -33,6 +37,18 @@ type (
 		Base `tlog:",embed"`
 
 		Left  Node
+		Right Node
+	}
+
+	VarDecl struct {
+		Base `tlog:",embed"`
+		Name Ident
+		Type Type
+	}
+
+	Assignment struct {
+		Base  `tlog:",embed"`
+		Left  Ident
 		Right Node
 	}
 )
