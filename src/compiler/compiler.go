@@ -6,10 +6,7 @@ import (
 
 	"github.com/nikandfor/errors"
 	"github.com/nikandfor/tlog"
-
-	"github.com/slowlang/slow/src/compiler/analyze"
-	"github.com/slowlang/slow/src/compiler/compile"
-	"github.com/slowlang/slow/src/compiler/parse"
+	"github.com/slowlang/slow/src/compiler/front"
 )
 
 func CompileFile(ctx context.Context, name string) (obj []byte, err error) {
@@ -24,26 +21,22 @@ func CompileFile(ctx context.Context, name string) (obj []byte, err error) {
 }
 
 func Compile(ctx context.Context, name string, text []byte) (obj []byte, err error) {
-	st := parse.New()
+	st := front.New()
 
-	st.AddFile(name, text)
+	st.AddFile(ctx, name, text)
 
-	x, err := st.Parse(ctx)
+	err = st.Parse(ctx)
 	if err != nil {
-		tlog.SpanFromContext(ctx).Printw("abstract syntax tree", "x_type", tlog.FormatNext("%T"), x, "x", x, "err", err)
+		//	tlog.SpanFromContext(ctx).Printw("abstract syntax tree", "x_type", tlog.FormatNext("%T"), x, "x", x, "err", err)
 		return nil, errors.Wrap(err, "parse text")
 	}
 
-	tlog.SpanFromContext(ctx).Printw("abstract syntax tree", "x_type", tlog.FormatNext("%T"), x, "x", x)
-
-	y, err := analyze.Analyze(ctx, st, x)
+	err = st.Analyze(ctx)
 	if err != nil {
-		return nil, errors.Wrap(err, "analyze ast")
+		return nil, errors.Wrap(err, "analyze")
 	}
 
-	tlog.SpanFromContext(ctx).Printw("intermediate representation", "y_type", tlog.FormatNext("%T"), y, "y", y)
-
-	obj, err = compile.Compile(ctx, y)
+	obj, err = st.Compile(ctx)
 	if err != nil {
 		return nil, errors.Wrap(err, "compile")
 	}

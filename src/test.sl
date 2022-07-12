@@ -1,1 +1,5 @@
-1+2+3+4+5
+func start(argc int) (rc int) {
+	a = argc
+	b = 2
+	return a + b + a
+}
