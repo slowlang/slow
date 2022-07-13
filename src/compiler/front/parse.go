@@ -1,6 +1,7 @@
 package front
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"strconv"
@@ -73,6 +74,13 @@ type (
 		Right Expr
 	}
 
+	Arch interface {
+		AllocReg(hint int) int
+	}
+
+	ARM64A struct {
+	}
+
 	Token interface{}
 	Expr  interface{}
 	Stmt  interface{}
@@ -96,7 +104,11 @@ type (
 		Token Token
 		Want  []Token
 	}
+
+	eoftp struct{}
 )
+
+var eof eoftp
 
 func New() *State {
 	return &State{}
@@ -113,8 +125,8 @@ func (s *State) AddFile(ctx context.Context, name string, text []byte) {
 	s.files = append(s.files, f)
 }
 
-func (s *State) Compile(ctx context.Context) ([]byte, error) {
-	b, err := s.compileFunc(ctx, nil, s.prog.Funcs[0])
+func (s *State) Compile(ctx context.Context, a Arch) ([]byte, error) {
+	b, err := s.compileFunc(ctx, nil, a, s.prog.Funcs[0])
 	if err != nil {
 		return nil, err
 	}
@@ -122,7 +134,7 @@ func (s *State) Compile(ctx context.Context) ([]byte, error) {
 	return b, nil
 }
 
-func (s *State) compileFunc(ctx context.Context, b []byte, f *Func) ([]byte, error) {
+func (s *State) compileFunc(ctx context.Context, b []byte, a Arch, f *Func) ([]byte, error) {
 	b = hfmt.AppendPrintf(b, `
 .align 4
 .global _%s
@@ -137,7 +149,7 @@ _%[1]s:
 		return nil, errors.New("no expr for ret arg")
 	}
 
-	b, err := s.compileExpr(ctx, b, f, 0, r)
+	b, err := s.compileExpr(ctx, b, a, f, 0, r)
 	if err != nil {
 		return nil, err
 	}
@@ -150,10 +162,10 @@ _%[1]s:
 	return b, nil
 }
 
-func (s *State) compileExpr(ctx context.Context, b []byte, f *Func, reg int, e Expr) (_ []byte, err error) {
+func (s *State) compileExpr(ctx context.Context, b []byte, a Arch, f *Func, reg int, e Expr) (_ []byte, err error) {
 	switch e := e.(type) {
 	case Word:
-		b = s.compileConst(ctx, b, reg, e)
+		b = s.compileConst(ctx, b, a, reg, e)
 	case Arg:
 		if reg == e.Num {
 			return b, nil
@@ -161,7 +173,7 @@ func (s *State) compileExpr(ctx context.Context, b []byte, f *Func, reg int, e E
 
 		b = hfmt.AppendPrintf(b, "	MOV	X%d, X%d\n", reg, e.Num)
 	case Sum:
-		b, err = s.compileExpr(ctx, b, f, reg+1, e.Left)
+		b, err = s.compileExpr(ctx, b, a, f, reg+1, e.Left)
 		if err != nil {
 			return nil, errors.Wrap(err, "left")
 		}
@@ -171,7 +183,7 @@ func (s *State) compileExpr(ctx context.Context, b []byte, f *Func, reg int, e E
 		} else if y.Value > 0 && y.Value < 1<<12 {
 			b = hfmt.AppendPrintf(b, "	ADD	X%d, X%d, #%d\n", reg, reg+1, y.Value)
 		} else {
-			b, err = s.compileExpr(ctx, b, f, reg+2, e.Right)
+			b, err = s.compileExpr(ctx, b, a, f, reg+2, e.Right)
 			if err != nil {
 				return nil, errors.Wrap(err, "right")
 			}
@@ -185,7 +197,7 @@ func (s *State) compileExpr(ctx context.Context, b []byte, f *Func, reg int, e E
 	return b, nil
 }
 
-func (s *State) compileConst(ctx context.Context, b []byte, reg int, y Word) (_ []byte) {
+func (s *State) compileConst(ctx context.Context, b []byte, a Arch, reg int, y Word) (_ []byte) {
 	b = hfmt.AppendPrintf(b, "	MOV	X%v, #%d\n", reg, y.Value&0xffff)
 
 	for sh := 0; y.Value > 0xffff; sh += 16 {
@@ -329,15 +341,31 @@ func (s *State) analyzeRhsExpr(ctx context.Context, f *Func, e Expr) (Expr, erro
 	}
 }
 
-func (s *State) Parse(ctx context.Context) error {
-	f, i, err := s.parseFunc(ctx, 0)
-	if err != nil {
-		return errors.Wrap(err, "at pos 0x%x", i)
+func (s *State) Parse(ctx context.Context) (err error) {
+loop:
+	for i := 0; i < len(s.b); {
+		tk, _, e := s.next(ctx, i)
+		switch tk {
+		case eof:
+			break loop
+		case Char('\n'):
+			i = e
+			continue
+		}
+
+		var f *Func
+
+		f, i, err = s.parseFunc(ctx, i)
+		if err != nil {
+			file, line, col := s.getPos(i)
+
+			return errors.Wrap(err, "%v:%v:%v", file, line, col)
+		}
+
+		s.prog.Funcs = append(s.prog.Funcs, f)
+
+		tlog.SpanFromContext(ctx).Printw("func", "f", f)
 	}
-
-	s.prog.Funcs = append(s.prog.Funcs, f)
-
-	tlog.SpanFromContext(ctx).Printw("func", "f", f)
 
 	return nil
 }
@@ -562,11 +590,14 @@ func (s *State) next(ctx context.Context, st int) (tk Token, tst int, i int) {
 		}(st)
 	}
 
-	st = skipSpaces(s.b, st)
+	i = st
+
+again:
+	st = skipSpaces(s.b, i)
 	i = st
 
 	if i == len(s.b) {
-		return nil, st, i
+		return eof, st, i
 	}
 
 	c := s.b[i]
@@ -589,8 +620,16 @@ func (s *State) next(ctx context.Context, st int) (tk Token, tst int, i int) {
 	case c >= '0' && c <= '9':
 		e := skipNum(s.b, i)
 		return Number(s.b[i:e]), st, e
+	case bytes.HasPrefix(s.b[i:], []byte("//")):
+		e := nextLine(s.b, i)
+		// ignore comments
+		i = e
+
+		goto again
 	default:
-		panic(c)
+		file, line, col := s.getPos(st)
+
+		panic(fmt.Sprintf("%v:%d:%d  unexpected %q", file, line, col, c))
 	}
 }
 
@@ -643,6 +682,41 @@ loop:
 	return
 }
 
+func (s *State) getPos(p int) (file string, line, col int) {
+	for i, f := range s.files {
+		if p < f.Base {
+			continue
+		}
+
+		file = f.Name
+
+		lim := len(s.b)
+		if i+1 < len(s.files) {
+			lim = s.files[i+1].Base
+		}
+
+		for lst := f.Base; lst < lim; {
+			line++
+
+			next := nextLine(s.b, lst)
+			if next < p {
+				lst = next
+				continue
+			}
+
+			col = 1 + p - lst
+
+			return
+		}
+	}
+
+	panic(p)
+}
+
+func (a *ARM64A) AllocReg(hint int) int {
+	return hint
+}
+
 func NewUnexpected(got Token, want ...Token) error {
 	return UnexpectedError{
 		Token: got,
@@ -658,6 +732,14 @@ func (e UnexpectedError) Error() string {
 	}
 
 	return fmt.Sprintf("unexpected token: %q (%[1]T) want: %v", e.Token, strings.Join(l, ", "))
+}
+
+func nextLine(b []byte, i int) int {
+	for i < len(b) && b[i] != '\n' {
+		i++
+	}
+
+	return i + 1
 }
 
 func skipNum(b []byte, i int) int {
@@ -677,7 +759,7 @@ func skipIdent(b []byte, i int) int {
 }
 
 func skipSpaces(b []byte, i int) int {
-	for i < len(b) && b[i] == ' ' || b[i] == '\t' {
+	for i < len(b) && (b[i] == ' ' || b[i] == '\t') {
 		i++
 	}
 

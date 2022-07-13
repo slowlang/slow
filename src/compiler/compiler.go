@@ -36,7 +36,7 @@ func Compile(ctx context.Context, name string, text []byte) (obj []byte, err err
 		return nil, errors.Wrap(err, "analyze")
 	}
 
-	obj, err = st.Compile(ctx)
+	obj, err = st.Compile(ctx, &front.ARM64A{})
 	if err != nil {
 		return nil, errors.Wrap(err, "compile")
 	}

@@ -9,7 +9,7 @@ run_%: %.out
 	ld -arch arm64 -o $@ $^ -e _start -lSystem -syslibroot `xcrun -sdk macosx --show-sdk-path`
 
 %.o: %.s
-	as -arch arm64 -o $@ $^
+	as -arch arm64 -o $@ $^ -g
 
 .PRECIOUS: %.s
 %.s: %.sl Makefile $(wildcard ./cmd/slow/*.go) $(wildcard ./compiler/*.go) $(wildcard ./compiler/*/*.go)
