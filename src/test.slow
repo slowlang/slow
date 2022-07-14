@@ -1,0 +1,56 @@
+func start(argc int) (rc int) {
+	// --- argc(0) -> a0, b0, c0
+
+	a = argc
+	b = 1
+	b = b + 2
+
+	c = a + b
+
+	// --- a0, b0, c0 -> c1
+
+	if a > b {
+		c = c + a
+//	} else {
+//		c = c + b
+	}
+
+	if 2 < 1 {
+		return 1
+	}
+
+	// --- a0, b0 -> a1, b1; c1
+
+//	a, b = swap(a, b)
+
+	// --- a1, b1, c1 -> c2
+
+//	for i := 0; i < a; i++ {
+//		c += b
+//	}
+
+	// --- c2 -> rc(0)
+
+	return c
+}
+
+//func swap(a int, b int) (_ int, _ int) {
+//	return b, a
+//}
+
+/*
+func start0(argc int) (rc int) {
+	if argc < 2 {
+		return 2
+	}
+
+	return argc
+}
+*/
+
+//	ADD X0, X0, X0
+//	ADD X0, X0, #2
+
+//	ADD X1, X0, #2
+//	ADD X2, X1, X0
+//	MOV X0, X2

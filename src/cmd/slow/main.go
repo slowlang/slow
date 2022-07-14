@@ -11,7 +11,7 @@ import (
 	"github.com/nikandfor/tlog/ext/tlflag"
 	"github.com/nikandfor/tlog/tlio"
 	"github.com/slowlang/slow/src/compiler"
-	"github.com/slowlang/slow/src/compiler/parse"
+	"github.com/slowlang/slow/src/compiler/format"
 )
 
 func main() {
@@ -46,7 +46,16 @@ func main() {
 		},
 	}
 
-	cli.RunAndExit(app, os.Args, os.Environ())
+	err := cli.Run(app, os.Args, os.Environ())
+	if err != nil {
+		fmtstr := "error: %v\n"
+		if tlog.If("v_error") {
+			fmtstr = "error: %+v\n"
+		}
+
+		fmt.Fprintf(app.Stderr, fmtstr, err)
+		os.Exit(1)
+	}
 }
 
 func before(c *cli.Command) (err error) {
@@ -77,12 +86,21 @@ func parseAct(c *cli.Command) (err error) {
 	ctx = tlog.ContextWithSpan(ctx, tlog.Root())
 
 	for _, a := range c.Args {
-		x, err := parse.ParseFile(ctx, a)
+		x, err := compiler.ParseFile(ctx, a)
 		if err != nil {
-			return errors.Wrap(err, "compile %v", a)
+			return errors.Wrap(err, "parse %v", a)
 		}
 
-		fmt.Printf("ast: %+v\n", x)
+		b, err := format.Format(ctx, nil, x)
+		if err != nil {
+			return errors.Wrap(err, "format %v", a)
+		}
+
+		if len(c.Args) > 1 {
+			fmt.Printf("// %s\n", a)
+		}
+
+		fmt.Printf("%s", b)
 	}
 
 	return nil

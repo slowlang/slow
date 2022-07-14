@@ -4,74 +4,24 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"strconv"
 	"strings"
 
 	"github.com/nikandfor/errors"
-	"github.com/nikandfor/hacked/hfmt"
 	"github.com/nikandfor/loc"
 	"github.com/nikandfor/tlog"
+	"github.com/slowlang/slow/src/compiler/ast"
 )
 
 type (
-	State struct {
-		b []byte // all files concatenated
+	Front struct {
+		b   []byte // all files concatenated
+		lim int    // end of current file
 
-		prog Prog
-
-		files []file
-	}
-
-	Scope struct {
-	}
-
-	Prog struct {
-		Package Ident
-
-		Funcs []*Func
-	}
-
-	Func struct {
-		Name    Ident
-		Args    Args
-		RetArgs Args
-		Body    *Block
-
-		syms map[string]Expr
-
-		obj []byte
-	}
-
-	Block struct {
-		Stmts []Stmt
-	}
-
-	Assignment struct {
-		Pos int
-		Lhs Expr
-		Rhs Expr
-	}
-
-	Return struct {
-		Pos   int
-		Value Expr
-	}
-
-	Args []Arg
-
-	Arg struct {
-		Num  int
-		Name Ident
-		Type Ident
+		files []*File
 	}
 
 	Word struct {
 		Value int64
-	}
-
-	Sum struct {
-		Left  Expr
-		Right Expr
 	}
 
 	Arch interface {
@@ -86,13 +36,13 @@ type (
 	Stmt  interface{}
 
 	Char    byte
-	Keyword []byte
-	Number  []byte
-	Ident   []byte
+	Keyword string
 
-	file struct {
-		Name string
-		Base int
+	File struct {
+		name string
+		base int
+
+		parsed *ast.File
 	}
 
 	Num struct {
@@ -110,299 +60,108 @@ type (
 
 var eof eoftp
 
-func New() *State {
-	return &State{}
+func New() *Front {
+	return &Front{}
 }
 
-func (s *State) AddFile(ctx context.Context, name string, text []byte) {
-	f := file{
-		Name: name,
-		Base: len(s.b),
+func (fc *Front) AddFile(ctx context.Context, name string, text []byte) *File {
+	f := &File{
+		name: name,
+		base: len(fc.b),
 	}
 
-	s.b = append(s.b, text...)
+	fc.b = append(fc.b, text...)
 
-	s.files = append(s.files, f)
+	fc.files = append(fc.files, f)
+
+	return f
 }
 
-func (s *State) Compile(ctx context.Context, a Arch) ([]byte, error) {
-	b, err := s.compileFunc(ctx, nil, a, s.prog.Funcs[0])
-	if err != nil {
-		return nil, err
-	}
-
-	return b, nil
-}
-
-func (s *State) compileFunc(ctx context.Context, b []byte, a Arch, f *Func) ([]byte, error) {
-	b = hfmt.AppendPrintf(b, `
-.align 4
-.global _%s
-_%[1]s:
-	STP	FP, LR, [SP, #-16]!
-	MOV	FP, SP
-
-`, f.Name)
-
-	r, ok := f.syms[string(f.RetArgs[0].Name)]
-	if !ok {
-		return nil, errors.New("no expr for ret arg")
-	}
-
-	b, err := s.compileExpr(ctx, b, a, f, 0, r)
-	if err != nil {
-		return nil, err
-	}
-
-	b = append(b, `
-	LDP	FP, LR, [SP], #16
-	RET
-`...)
-
-	return b, nil
-}
-
-func (s *State) compileExpr(ctx context.Context, b []byte, a Arch, f *Func, reg int, e Expr) (_ []byte, err error) {
-	switch e := e.(type) {
-	case Word:
-		b = s.compileConst(ctx, b, a, reg, e)
-	case Arg:
-		if reg == e.Num {
-			return b, nil
-		}
-
-		b = hfmt.AppendPrintf(b, "	MOV	X%d, X%d\n", reg, e.Num)
-	case Sum:
-		b, err = s.compileExpr(ctx, b, a, f, reg+1, e.Left)
+func (fc *Front) Parse(ctx context.Context) (err error) {
+	for j := range fc.files {
+		ff, i, err := fc.parseFile(ctx, j)
 		if err != nil {
-			return nil, errors.Wrap(err, "left")
+			file, line, col := fc.getPos(i)
+
+			return errors.Wrap(err, "%v:%v:%v", file, line, col)
 		}
 
-		if y, ok := e.Right.(Word); ok && y.Value == 0 {
-			// nothing to do
-		} else if y.Value > 0 && y.Value < 1<<12 {
-			b = hfmt.AppendPrintf(b, "	ADD	X%d, X%d, #%d\n", reg, reg+1, y.Value)
-		} else {
-			b, err = s.compileExpr(ctx, b, a, f, reg+2, e.Right)
-			if err != nil {
-				return nil, errors.Wrap(err, "right")
-			}
-
-			b = hfmt.AppendPrintf(b, "	ADD	X%d, X%d, X%d\n", reg, reg+1, reg+2)
-		}
-	default:
-		panic(e)
-	}
-
-	return b, nil
-}
-
-func (s *State) compileConst(ctx context.Context, b []byte, a Arch, reg int, y Word) (_ []byte) {
-	b = hfmt.AppendPrintf(b, "	MOV	X%v, #%d\n", reg, y.Value&0xffff)
-
-	for sh := 0; y.Value > 0xffff; sh += 16 {
-		y.Value >>= 16
-
-		b = hfmt.AppendPrintf(b, "	MOV	X%v, #%d, LSL #%d // Word\n", reg, y.Value&0xffff, sh)
-	}
-
-	return b
-}
-
-func (s *State) Analyze(ctx context.Context) error {
-	err := s.analyzeFunc(ctx, s.prog.Funcs[0])
-	if err != nil {
-		return err
+		fc.files[j].parsed = ff
 	}
 
 	return nil
 }
 
-func (s *State) analyzeFunc(ctx context.Context, f *Func) error {
-	f.syms = make(map[string]Expr)
-
-	for _, a := range f.Args {
-		f.syms[string(a.Name)] = a
+func (fc *Front) parseFile(ctx context.Context, j int) (ff *ast.File, i int, err error) {
+	i = fc.files[j].base
+	fc.lim = len(fc.b)
+	if j+1 < len(fc.files) {
+		fc.lim = fc.files[j+1].base
 	}
 
-	err := s.analyzeBlock(ctx, f, f.Body)
-	if err != nil {
-		return err
-	}
+	ff = &ast.File{}
 
-	ret, ok := f.syms[string(f.RetArgs[0].Name)]
-	if !ok {
-		return errors.New("no result")
-	}
-
-	tlog.SpanFromContext(ctx).Printw("func", "name", f.Name, "result", ret)
-	tlog.SpanFromContext(ctx).Printw("func", "syms", f.syms)
-
-	return nil
-}
-
-func (s *State) analyzeBlock(ctx context.Context, f *Func, b *Block) (err error) {
-	for _, st := range b.Stmts {
-		var pos int
-
-		switch st := st.(type) {
-		case Assignment:
-			pos = st.Pos
-			err = s.analyzeAssignment(ctx, f, st)
-		case Return:
-			pos = st.Pos
-			err = s.analyzeReturn(ctx, f, st)
-		}
-
-		if err != nil {
-			return errors.Wrap(err, "at pos 0x%x", pos)
-		}
-	}
-
-	return nil
-}
-
-func (s *State) analyzeReturn(ctx context.Context, f *Func, r Return) error {
-	e, err := s.analyzeRhsExpr(ctx, f, r.Value)
-	if err != nil {
-		return err
-	}
-
-	tlog.SpanFromContext(ctx).Printw("return", "val", r.Value, "expr", e)
-
-	f.syms[string(f.RetArgs[0].Name)] = e
-
-	return nil
-}
-
-func (s *State) analyzeAssignment(ctx context.Context, f *Func, a Assignment) error {
-	name, err := s.analyzeLhsExpr(ctx, f, a.Lhs)
-	if err != nil {
-		return err
-	}
-
-	e, err := s.analyzeRhsExpr(ctx, f, a.Rhs)
-	if err != nil {
-		return err
-	}
-
-	f.syms[string(name.(Ident))] = e
-
-	tlog.SpanFromContext(ctx).Printw("assign", "lhs", a.Lhs, "rhs", a.Rhs, "expr", e)
-
-	return nil
-}
-
-func (s *State) analyzeLhsExpr(ctx context.Context, f *Func, e Expr) (Expr, error) {
-	switch e := e.(type) {
-	case Ident:
-		return e, nil
-	case Number:
-		return nil, errors.New("rhs expected, got %v", e)
-	default:
-		panic(e)
-	}
-}
-
-func (s *State) analyzeRhsExpr(ctx context.Context, f *Func, e Expr) (Expr, error) {
-	switch e := e.(type) {
-	case Word:
-		return e, nil
-	case Number:
-		v, err := strconv.ParseInt(string(e), 10, 64)
-		if err != nil {
-			return nil, errors.Wrap(err, "parse int")
-		}
-
-		return Word{Value: v}, nil
-	case Ident:
-		r, ok := f.syms[string(e)]
-		if !ok {
-			return nil, errors.New("unknown symbol: %q", e)
-		}
-
-		return s.analyzeRhsExpr(ctx, f, r)
-	case Arg:
-		return e, nil
-	case Sum:
-		l, err := s.analyzeRhsExpr(ctx, f, e.Left)
-		if err != nil {
-			return nil, errors.Wrap(err, "analyze left")
-		}
-
-		r, err := s.analyzeRhsExpr(ctx, f, e.Right)
-		if err != nil {
-			return nil, errors.Wrap(err, "analyze right")
-		}
-
-		return Sum{Left: l, Right: r}, nil
-	default:
-		panic(e)
-	}
-}
-
-func (s *State) Parse(ctx context.Context) (err error) {
 loop:
-	for i := 0; i < len(s.b); {
-		tk, _, e := s.next(ctx, i)
+	for {
+		tk, tst, e := fc.next(ctx, i)
 		switch tk {
 		case eof:
 			break loop
 		case Char('\n'):
 			i = e
 			continue
+		case Keyword("func"):
+			var f *ast.Func
+
+			f, i, err = fc.parseFunc(ctx, i)
+			if err != nil {
+				return nil, i, errors.Wrap(err, "func")
+			}
+
+			ff.Funcs = append(ff.Funcs, f)
+
+			tlog.SpanFromContext(ctx).Printw("func", "f", f)
+		default:
+			return nil, tst, NewUnexpected(tk, Keyword("func"))
 		}
-
-		var f *Func
-
-		f, i, err = s.parseFunc(ctx, i)
-		if err != nil {
-			file, line, col := s.getPos(i)
-
-			return errors.Wrap(err, "%v:%v:%v", file, line, col)
-		}
-
-		s.prog.Funcs = append(s.prog.Funcs, f)
-
-		tlog.SpanFromContext(ctx).Printw("func", "f", f)
 	}
 
-	return nil
+	return ff, i, nil
 }
 
-func (s *State) parseFunc(ctx context.Context, st int) (f *Func, i int, err error) {
-	tk, tst, i := s.next(ctx, st)
+func (fc *Front) parseFunc(ctx context.Context, st int) (f *ast.Func, i int, err error) {
+	tk, tst, i := fc.next(ctx, st)
 	if kw, ok := tk.(Keyword); !ok || string(kw) != "func" {
 		return nil, tst, NewUnexpected(tk, Keyword("func"))
 	}
 
-	tk, tst, i = s.next(ctx, i)
-	name, ok := tk.(Ident)
+	tk, tst, i = fc.next(ctx, i)
+	name, ok := tk.(ast.Ident)
 	if !ok {
-		return nil, tst, NewUnexpected(tk, Ident{})
+		return nil, tst, NewUnexpected(tk, ast.Ident(""))
 	}
 
-	args, i, err := s.parseArgs(ctx, i)
+	args, i, err := fc.parseArgs(ctx, i)
 	if err != nil {
-		return
+		return nil, i, errors.Wrap(err, "args")
 	}
 
-	var ret Args
-	tk, tst, _ = s.next(ctx, i)
+	var ret ast.Args
+	tk, tst, _ = fc.next(ctx, i)
 	if c, ok := tk.(Char); ok && c == Char('(') {
-		ret, i, err = s.parseArgs(ctx, i)
+		ret, i, err = fc.parseArgs(ctx, i)
 		if err != nil {
-			return
+			return nil, i, errors.Wrap(err, "ret args")
 		}
 	}
 
-	b, i, err := s.parseBlock(ctx, i)
+	b, i, err := fc.parseBlock(ctx, i)
 	if err != nil {
-		return
+		return nil, i, errors.Wrap(err, "body")
 	}
 
-	f = &Func{
-		Name:    name,
+	f = &ast.Func{
+		Name:    string(name),
 		Args:    args,
 		RetArgs: ret,
 		Body:    b,
@@ -411,8 +170,8 @@ func (s *State) parseFunc(ctx context.Context, st int) (f *Func, i int, err erro
 	return
 }
 
-func (s *State) parseArgs(ctx context.Context, st int) (a Args, i int, err error) {
-	tk, tst, i := s.next(ctx, st)
+func (fc *Front) parseArgs(ctx context.Context, st int) (a ast.Args, i int, err error) {
+	tk, tst, i := fc.next(ctx, st)
 	if tk != Char('(') {
 		return nil, tst, NewUnexpected(tk, Char('('))
 	}
@@ -420,7 +179,7 @@ func (s *State) parseArgs(ctx context.Context, st int) (a Args, i int, err error
 loop:
 	for {
 		j := i
-		tk, tst, i = s.next(ctx, i)
+		tk, tst, i = fc.next(ctx, i)
 		switch tk {
 		case Char('\n'), Char(','):
 			continue
@@ -430,39 +189,39 @@ loop:
 			i = j
 		}
 
-		tk, tst, i = s.next(ctx, i)
-		name, ok := tk.(Ident)
+		tk, tst, i = fc.next(ctx, i)
+		name, ok := tk.(ast.Ident)
 		if !ok {
-			return nil, tst, NewUnexpected(tk, Ident{})
+			return nil, tst, NewUnexpected(tk, ast.Ident(""))
 		}
 
-		tk, tst, i = s.next(ctx, i)
-		typ, ok := tk.(Ident)
+		tk, tst, i = fc.next(ctx, i)
+		typ, ok := tk.(ast.Ident)
 		if !ok {
-			return nil, tst, NewUnexpected(tk, Ident{})
+			return nil, tst, NewUnexpected(tk, ast.Ident(""))
 		}
 
-		a = append(a, Arg{
-			Name: name,
-			Type: typ,
+		a = append(a, ast.Arg{
+			Name: string(name),
+			Type: string(typ),
 		})
 	}
 
 	return
 }
 
-func (s *State) parseBlock(ctx context.Context, st int) (b *Block, i int, err error) {
-	tk, tst, i := s.next(ctx, st)
+func (fc *Front) parseBlock(ctx context.Context, st int) (b *ast.Block, i int, err error) {
+	tk, tst, i := fc.next(ctx, st)
 	if tk != Char('{') {
 		return nil, tst, NewUnexpected(tk, Char('{'))
 	}
 
-	b = &Block{}
+	b = &ast.Block{}
 
 loop:
 	for {
 		j := i
-		tk, tst, i = s.next(ctx, i)
+		tk, tst, i = fc.next(ctx, i)
 		switch tk {
 		case Char('\n'), Char(';'):
 			continue
@@ -473,7 +232,7 @@ loop:
 		}
 
 		var stmt Stmt
-		stmt, i, err = s.parseStatement(ctx, i)
+		stmt, i, err = fc.parseStatement(ctx, i)
 		if err != nil {
 			return
 		}
@@ -484,84 +243,136 @@ loop:
 	return
 }
 
-func (s *State) parseStatement(ctx context.Context, st int) (x Stmt, i int, err error) {
-	tk, tst, i := s.next(ctx, st)
+func (fc *Front) parseStatement(ctx context.Context, st int) (x ast.Stmt, i int, err error) {
+	tk, tst, i := fc.next(ctx, st)
 
 	switch tk := tk.(type) {
-	case Ident:
-		return s.parseAssignment(ctx, st)
+	case ast.Ident:
+		return fc.parseAssignment(ctx, st)
 	case Keyword:
 		switch string(tk) {
 		case "return":
-			return s.parseReturn(ctx, st, i)
+			return fc.parseReturn(ctx, st, i)
+		case "if":
+			return fc.parseIf(ctx, st, i)
 		default:
-			return nil, tst, NewUnexpected(tk, Keyword{})
+			return nil, tst, NewUnexpected(tk, Keyword(""))
 		}
 	default:
-		return nil, tst, NewUnexpected(tk, Ident{}, Keyword{})
+		return nil, tst, NewUnexpected(tk, ast.Ident(""), Keyword(""))
 	}
 }
 
-func (s *State) parseReturn(ctx context.Context, st, vst int) (x Stmt, i int, err error) {
-	exp, i, err := s.parseExpr(ctx, vst)
+func (fc *Front) parseReturn(ctx context.Context, st, vst int) (x ast.Stmt, i int, err error) {
+	exp, i, err := fc.parseExpr(ctx, vst)
 	if err != nil {
 		return nil, i, errors.Wrap(err, "return")
 	}
 
 	tlog.SpanFromContext(ctx).Printw("return", "val", exp)
 
-	return Return{Pos: st, Value: exp}, i, nil
+	return ast.Return{Pos: st, Value: exp}, i, nil
 }
 
-func (s *State) parseAssignment(ctx context.Context, st int) (x Stmt, i int, err error) {
-	lhs, i, err := s.parseExpr(ctx, st)
+func (fc *Front) parseIf(ctx context.Context, st, vst int) (x ast.Stmt, i int, err error) {
+	exp, i, err := fc.parseExpr(ctx, vst)
+	if err != nil {
+		return nil, i, errors.Wrap(err, "condition")
+	}
+
+	b, i, err := fc.parseBlock(ctx, i)
+	if err != nil {
+		return nil, i, errors.Wrap(err, "then block")
+	}
+
+	tlog.SpanFromContext(ctx).Printw("if stmt", "cond", exp, "then", b)
+
+	return &ast.IfStmt{Pos: st, Cond: exp, Then: b}, i, nil
+}
+
+func (fc *Front) parseAssignment(ctx context.Context, st int) (x ast.Stmt, i int, err error) {
+	lhs, i, err := fc.parseExpr(ctx, st)
 	if err != nil {
 		return x, i, errors.Wrap(err, "lhs")
 	}
 
-	tk, tst, i := s.next(ctx, i)
-	if tk != Char('=') {
-		return x, tst, NewUnexpected(tk, Char('='))
+	tk, tst, i := fc.next(ctx, i)
+	if tk != ast.Op("=") {
+		return x, tst, NewUnexpected(tk, ast.Op("="))
 	}
 
-	rhs, i, err := s.parseExpr(ctx, i)
+	rhs, i, err := fc.parseExpr(ctx, i)
 	if err != nil {
 		return x, i, errors.Wrap(err, "rhs")
 	}
 
 	tlog.SpanFromContext(ctx).Printw("assignment", "lhs", lhs, "rhs", rhs)
 
-	return Assignment{
+	return ast.Assignment{
 		Pos: st,
 		Lhs: lhs,
 		Rhs: rhs,
 	}, i, nil
 }
 
-func (s *State) parseExpr(ctx context.Context, st int) (_ Expr, i int, err error) {
-	return s.parseSum(ctx, st)
+func (fc *Front) parseExpr(ctx context.Context, st int) (x ast.Expr, i int, err error) {
+	return fc.parseCmp(ctx, st)
 }
 
-func (s *State) parseSum(ctx context.Context, st int) (_ Expr, i int, err error) {
-	larg, i, err := s.parseExprArg(ctx, st)
+func (fc *Front) parseCmp(ctx context.Context, st int) (x ast.Expr, i int, err error) {
+	x, i, err = fc.parseSum(ctx, st)
 	if err != nil {
-		return
+		return nil, i, errors.Wrap(err, "sum")
+	}
+
+	tk, tst, e := fc.next(ctx, i)
+	op, ok := tk.(ast.Op)
+	if !ok {
+		return x, tst, nil
+	}
+
+	switch op {
+	case "==", "<", ">", "<=", ">=":
+	default:
+		return x, tst, nil
+	}
+
+	r, i, err := fc.parseSum(ctx, e)
+	if err != nil {
+		return nil, i, errors.Wrap(err, "sum")
+	}
+
+	x = ast.BinOp{
+		Op:    op,
+		Left:  x,
+		Right: r,
+	}
+
+	return x, i, nil
+}
+
+func (fc *Front) parseSum(ctx context.Context, st int) (x ast.Expr, i int, err error) {
+	larg, i, err := fc.parseMul(ctx, st)
+	if err != nil {
+		return nil, i, errors.Wrap(err, "mul")
 	}
 
 	for {
-		tk, tst, e := s.next(ctx, i)
-		if c, ok := tk.(Char); !ok || c != Char('+') {
+		tk, tst, e := fc.next(ctx, i)
+		op, ok := tk.(ast.Op)
+		if !ok || op != "+" && op != "-" {
 			i = tst
 			break
 		}
 
 		var rarg Expr
-		rarg, i, err = s.parseExprArg(ctx, e)
+		rarg, i, err = fc.parseMul(ctx, e)
 		if err != nil {
-			return
+			return nil, i, errors.Wrap(err, "mul")
 		}
 
-		larg = Sum{
+		larg = ast.BinOp{
+			Op:    op,
 			Left:  larg,
 			Right: rarg,
 		}
@@ -570,20 +381,50 @@ func (s *State) parseSum(ctx context.Context, st int) (_ Expr, i int, err error)
 	return larg, i, nil
 }
 
-func (s *State) parseExprArg(ctx context.Context, st int) (_ Expr, i int, err error) {
-	tk, tst, i := s.next(ctx, st)
+func (fc *Front) parseMul(ctx context.Context, st int) (_ ast.Expr, i int, err error) {
+	larg, i, err := fc.parseExprArg(ctx, st)
+	if err != nil {
+		return nil, i, errors.Wrap(err, "arg")
+	}
+
+	for {
+		tk, tst, e := fc.next(ctx, i)
+		op, ok := tk.(ast.Op)
+		if !ok || op != "*" && op != "/" {
+			i = tst
+			break
+		}
+
+		var rarg Expr
+		rarg, i, err = fc.parseExprArg(ctx, e)
+		if err != nil {
+			return nil, i, errors.Wrap(err, "arg")
+		}
+
+		larg = ast.BinOp{
+			Op:    op,
+			Left:  larg,
+			Right: rarg,
+		}
+	}
+
+	return larg, i, nil
+}
+
+func (fc *Front) parseExprArg(ctx context.Context, st int) (_ ast.Expr, i int, err error) {
+	tk, tst, i := fc.next(ctx, st)
 
 	switch tk := tk.(type) {
-	case Number:
+	case ast.Number:
 		return tk, i, nil
-	case Ident:
+	case ast.Ident:
 		return tk, i, nil
 	default:
-		return nil, tst, NewUnexpected(tk, Number{}, Ident{})
+		return nil, tst, NewUnexpected(tk, ast.Number(""), ast.Ident(""))
 	}
 }
 
-func (s *State) next(ctx context.Context, st int) (tk Token, tst int, i int) {
+func (fc *Front) next(ctx context.Context, st int) (tk Token, tst int, i int) {
 	if tr := tlog.SpanFromContext(ctx); tr.If("next_token") {
 		defer func(st int) {
 			tr.Printw("next token", "st", st, "tk", tk, "tst", tst, "i", i, "from", loc.Callers(1, 3))
@@ -593,48 +434,65 @@ func (s *State) next(ctx context.Context, st int) (tk Token, tst int, i int) {
 	i = st
 
 again:
-	st = skipSpaces(s.b, i)
+	st = skipSpaces(fc.b, i)
 	i = st
 
-	if i == len(s.b) {
+	if i >= fc.lim {
 		return eof, st, i
 	}
 
-	c := s.b[i]
+	c := fc.b[i]
 
 	switch c {
-	case '[', ']', '{', '}', '(', ')', '=', '+', '-', ';', '\n', '\t':
-		return Char(s.b[i]), st, i + 1
+	case '[', ']', '{', '}', '(', ')',
+		';', '\n', '\t':
+
+		return Char(fc.b[i]), st, i + 1
+	case '=', '+', '-', '>', '<', '&', '|':
+		if i+1 < fc.lim && (fc.b[i+1] == c || fc.b[i+1] == '=') {
+			return ast.Op(fc.b[i : i+2]), st, i + 2
+		}
+
+		return ast.Op(fc.b[i : i+1]), st, i + 1
 	}
 
 	switch {
 	case c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z':
-		e := skipIdent(s.b, i)
+		e := skipIdent(fc.b, i)
 
-		switch string(s.b[i:e]) {
-		case "return", "func", "for", "break", "continue", "import", "var", "const", "type":
-			return Keyword(s.b[i:e]), st, e
+		switch string(fc.b[i:e]) {
+		case "return", "func", "for", "break", "continue", "import", "var", "const", "type", "if", "else":
+			return Keyword(fc.b[i:e]), st, e
 		}
 
-		return Ident(s.b[i:e]), st, e
+		return ast.Ident(fc.b[i:e]), st, e
 	case c >= '0' && c <= '9':
-		e := skipNum(s.b, i)
-		return Number(s.b[i:e]), st, e
-	case bytes.HasPrefix(s.b[i:], []byte("//")):
-		e := nextLine(s.b, i)
+		e := skipNum(fc.b, i)
+		return ast.Number(fc.b[i:e]), st, e
+	case bytes.HasPrefix(fc.b[i:], []byte("//")):
+		e := nextLine(fc.b, i)
 		// ignore comments
 		i = e
 
 		goto again
+	case bytes.HasPrefix(fc.b[i:], []byte("/*")):
+		e := bytes.Index(fc.b[i:], []byte("*/"))
+		if e == -1 {
+			panic("no end of comment")
+		}
+
+		i += e + 2
+
+		goto again
 	default:
-		file, line, col := s.getPos(st)
+		file, line, col := fc.getPos(st)
 
 		panic(fmt.Sprintf("%v:%d:%d  unexpected %q", file, line, col, c))
 	}
 }
 
-func (s *State) parseNum(ctx context.Context, st int) (x Num, i int, err error) {
-	b := s.b
+func (fc *Front) parseNum(ctx context.Context, st int) (x Num, i int, err error) {
+	b := fc.b
 	i = st
 
 	if i < len(b) && b[i] == '0' {
@@ -682,23 +540,23 @@ loop:
 	return
 }
 
-func (s *State) getPos(p int) (file string, line, col int) {
-	for i, f := range s.files {
-		if p < f.Base {
+func (fc *Front) getPos(p int) (file string, line, col int) {
+	for i, f := range fc.files {
+		if p < f.base {
 			continue
 		}
 
-		file = f.Name
+		file = f.name
 
-		lim := len(s.b)
-		if i+1 < len(s.files) {
-			lim = s.files[i+1].Base
+		lim := len(fc.b)
+		if i+1 < len(fc.files) {
+			lim = fc.files[i+1].base
 		}
 
-		for lst := f.Base; lst < lim; {
+		for lst := f.base; lst < lim; {
 			line++
 
-			next := nextLine(s.b, lst)
+			next := nextLine(fc.b, lst)
 			if next < p {
 				lst = next
 				continue
@@ -711,10 +569,6 @@ func (s *State) getPos(p int) (file string, line, col int) {
 	}
 
 	panic(p)
-}
-
-func (a *ARM64A) AllocReg(hint int) int {
-	return hint
 }
 
 func NewUnexpected(got Token, want ...Token) error {
@@ -768,4 +622,8 @@ func skipSpaces(b []byte, i int) int {
 
 func (c Char) String() string {
 	return string(c)
+}
+
+func (f *File) Parsed() *ast.File {
+	return f.parsed
 }
