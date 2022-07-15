@@ -24,13 +24,6 @@ type (
 		Value int64
 	}
 
-	Arch interface {
-		AllocReg(hint int) int
-	}
-
-	ARM64A struct {
-	}
-
 	Token interface{}
 	Expr  interface{}
 	Stmt  interface{}
@@ -42,7 +35,8 @@ type (
 		name string
 		base int
 
-		parsed *ast.File
+		parsed   *ast.File
+		analyzed []*FuncScope
 	}
 
 	Num struct {

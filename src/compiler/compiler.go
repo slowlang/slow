@@ -48,17 +48,22 @@ func CompileFile(ctx context.Context, name string) (obj []byte, err error) {
 }
 
 func Compile(ctx context.Context, name string, text []byte) (obj []byte, err error) {
-	st := front.New()
+	c := front.New()
 
-	st.AddFile(ctx, name, text)
+	c.AddFile(ctx, name, text)
 
-	err = st.Parse(ctx)
+	err = c.Parse(ctx)
 	if err != nil {
 		//	tlog.SpanFromContext(ctx).Printw("abstract syntax tree", "x_type", tlog.FormatNext("%T"), x, "x", x, "err", err)
 		return nil, errors.Wrap(err, "parse text")
 	}
 
-	err = st.Analyze(ctx)
+	err = c.Analyze(ctx)
+	if err != nil {
+		return nil, errors.Wrap(err, "front analyze")
+	}
+
+	obj, err = c.Compile(ctx, nil)
 	if err != nil {
 		return nil, errors.Wrap(err, "front compile")
 	}

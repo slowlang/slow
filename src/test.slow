@@ -19,9 +19,9 @@ func start(argc int) (rc int) {
 //		c = c + b
 	}
 
-	if 2 < 1 {
-		return 1
-	}
+//	if 2 < 1 {
+//		return 1
+//	}
 
 	// --- a0, b0 -> a1, b1; c1
 

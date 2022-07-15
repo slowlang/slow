@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 
 	"github.com/nikandfor/errors"
 	"github.com/nikandfor/loc"
@@ -19,13 +20,25 @@ type (
 		Uses   map[int]struct{}
 		UsedBy map[int]struct{}
 		Value  Expr
+
+		//	Cost Expr
+		//	Regs Expr
+
+		Reg  int
+		Used int
 	}
 
 	FuncScope struct {
+		Name string
+
 		Expr  []*CalcExpr
 		ByVal map[Expr]int
 
 		Return int
+
+		State *State
+
+		Arch *Arch
 	}
 
 	State struct {
@@ -62,6 +75,8 @@ func (fc *Front) Analyze(ctx context.Context) (err error) {
 		}
 
 		tlog.SpanFromContext(ctx).Printw("func", "ff", ff)
+
+		fc.files[0].analyzed = append(fc.files[0].analyzed, ff)
 	}
 
 	return nil
@@ -69,6 +84,7 @@ func (fc *Front) Analyze(ctx context.Context) (err error) {
 
 func (fc *Front) analyzeFunc(ctx context.Context, parentScope any, f *ast.Func) (ff *FuncScope, err error) {
 	ff = &FuncScope{
+		Name:  f.Name,
 		ByVal: map[Expr]int{},
 	}
 
@@ -88,6 +104,7 @@ func (fc *Front) analyzeFunc(ctx context.Context, parentScope any, f *ast.Func) 
 	}
 
 	ff.Return = ss.getReturn(nil)
+	ff.State = ss
 
 	tlog.Printw("func", "ret", ff.Return)
 
@@ -126,6 +143,7 @@ func (fc *Front) analyzeFunc(ctx context.Context, parentScope any, f *ast.Func) 
 func (fc *Front) analyzeBlock(ctx context.Context, s *State, b *ast.Block) (_ *State, err error) {
 loop:
 	for _, x := range b.Stmts {
+		//	statement:
 		switch x := x.(type) {
 		case ast.Assignment:
 			r, err := fc.calcRhsExpr(ctx, s, x.Rhs)
@@ -174,6 +192,17 @@ loop:
 				return nil, errors.Wrap(err, "if then")
 			}
 
+			/*
+				switch v := r.Value.(type) {
+				case bool:
+					if v {
+						s = t
+					}
+
+					break statement
+				}
+			*/
+
 			next := &State{
 				Prev: s,
 				Func: s.Func,
@@ -214,7 +243,16 @@ func (fc *Front) calcRhsExpr(ctx context.Context, s *State, e ast.Expr) (x *Calc
 
 		return x, nil
 	case ast.Number:
-		x = s.Func.newExpr(e)
+		v, err := strconv.ParseInt(string(e), 10, 64)
+		if err != nil {
+			return nil, errors.Wrap(err, "parse int")
+		}
+
+		if id, ok := s.Func.ByVal[ir.Word{Value: v}]; ok {
+			return s.Func.Expr[id], nil
+		}
+
+		x = s.Func.newExpr(ir.Word{Value: v})
 
 		return x, nil
 	case ast.BinOp:
@@ -228,10 +266,9 @@ func (fc *Front) calcRhsExpr(ctx context.Context, s *State, e ast.Expr) (x *Calc
 			return nil, errors.Wrap(err, "binop right")
 		}
 
-		q := CalcBinOp{
-			Op: e.Op,
-			L:  l.ID,
-			R:  r.ID,
+		q, err := fc.Precalc(ctx, s, e.Op, l, r)
+		if err != nil {
+			return nil, errors.Wrap(err, "calc const")
 		}
 
 		if id, ok := s.Func.ByVal[q]; ok {
@@ -258,6 +295,37 @@ func (fc *Front) calcLhsExpr(ctx context.Context, s *State, e ast.Expr) (x Expr,
 	default:
 		return nil, errors.New("unsupported type: %T", e)
 	}
+}
+
+func (fc *Front) Precalc(ctx context.Context, s *State, op ast.Op, l, r *CalcExpr) (x Expr, err error) {
+	x = CalcBinOp{
+		Op: op,
+		L:  l.ID,
+		R:  r.ID,
+	}
+
+	return x, nil
+
+	a, ok := l.Value.(ir.Word)
+	if !ok {
+		return
+	}
+
+	b, ok := r.Value.(ir.Word)
+	if !ok {
+		return
+	}
+
+	switch op {
+	case "<":
+		x = a.Value < b.Value
+	case ">":
+		x = a.Value > b.Value
+	case "+":
+		x = ir.Word{Value: a.Value + b.Value}
+	}
+
+	return
 }
 
 func (s *State) getVar(n ast.Ident) (id int, err error) {
@@ -358,7 +426,7 @@ func (ff *FuncScope) dump(w io.Writer, d, t int) {
 	fmt.Fprintf(w, "%2d  %v", t, "\t\t\t\t\t\t\t\t\t"[:d])
 
 	switch v := e.Value.(type) {
-	case ir.Arg, ast.Number:
+	case ir.Arg, ir.Word:
 		fmt.Fprintf(w, "%T %[1]v\n", v)
 	case CalcBinOp:
 		fmt.Fprintf(w, "%v\n", v.Op)
