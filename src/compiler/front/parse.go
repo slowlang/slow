@@ -202,7 +202,7 @@ loop:
 		}
 
 		a = append(a, ast.Arg{
-			Name: string(name),
+			Name: name,
 			Type: string(typ),
 		})
 	}

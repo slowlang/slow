@@ -58,7 +58,7 @@ func Compile(ctx context.Context, name string, text []byte) (obj []byte, err err
 		return nil, errors.Wrap(err, "parse text")
 	}
 
-	err = st.Compile(ctx)
+	err = st.Analyze(ctx)
 	if err != nil {
 		return nil, errors.Wrap(err, "front compile")
 	}

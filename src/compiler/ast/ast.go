@@ -22,7 +22,7 @@ type (
 
 	Arg struct {
 		Num  int
-		Name string
+		Name Ident
 		Type string
 	}
 

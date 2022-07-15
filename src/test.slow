@@ -1,6 +1,10 @@
 func start(argc int) (rc int) {
 	// --- argc(0) -> a0, b0, c0
 
+//	if 2 < 1 {
+//		return 2
+//	}
+
 	a = argc
 	b = 1
 	b = b + 2
