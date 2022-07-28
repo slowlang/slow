@@ -249,6 +249,8 @@ func (fc *Front) parseStatement(ctx context.Context, st int) (x ast.Stmt, i int,
 			return fc.parseReturn(ctx, st, i)
 		case "if":
 			return fc.parseIf(ctx, st, i)
+		case "for":
+			return fc.parseFor(ctx, st, i)
 		default:
 			return nil, tst, NewUnexpected(tk, Keyword(""))
 		}
@@ -282,6 +284,22 @@ func (fc *Front) parseIf(ctx context.Context, st, vst int) (x ast.Stmt, i int, e
 	tlog.SpanFromContext(ctx).Printw("if stmt", "cond", exp, "then", b)
 
 	return &ast.IfStmt{Pos: st, Cond: exp, Then: b}, i, nil
+}
+
+func (fc *Front) parseFor(ctx context.Context, st, vst int) (x ast.Stmt, i int, err error) {
+	exp, i, err := fc.parseExpr(ctx, vst)
+	if err != nil {
+		return nil, i, errors.Wrap(err, "condition")
+	}
+
+	b, i, err := fc.parseBlock(ctx, i)
+	if err != nil {
+		return nil, i, errors.Wrap(err, "then block")
+	}
+
+	tlog.SpanFromContext(ctx).Printw("for stmt", "cond", exp, "then", b)
+
+	return &ast.ForStmt{Pos: st, Cond: exp, Body: b}, i, nil
 }
 
 func (fc *Front) parseAssignment(ctx context.Context, st int) (x ast.Stmt, i int, err error) {

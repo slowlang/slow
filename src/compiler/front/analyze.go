@@ -51,6 +51,7 @@ type (
 
 		Cond int
 		Alt  *State
+		Loop *State
 	}
 
 	CalcBinOp struct {
@@ -123,14 +124,38 @@ func (fc *Front) analyzeFunc(ctx context.Context, parentScope any, f *ast.Func) 
 			p(s.Alt, s.Prev)
 		}
 
-		tlog.Printw("state block",
-			"vars", s.Vars,
-			"return", s.Return,
+		if s.Loop != nil {
+			p(s.Loop, s.Prev)
+		}
+
+		args := []interface{}{}
+
+		if len(s.Vars) != 0 {
+			args = append(args, "vars", s.Vars)
+		}
+		if len(s.Return) != 0 {
+			args = append(args, "return", s.Return)
+		}
+
+		args = append(args,
 			"ptr", tlog.FormatNext("%p"), s,
 			"prev", tlog.FormatNext("%p"), s.Prev,
-			"alt", tlog.FormatNext("%p"), s.Alt,
-			"cond", s.Cond,
 		)
+
+		if s.Alt != nil {
+			args = append(args,
+				"alt", tlog.FormatNext("%p"), s.Alt,
+				"cond", s.Cond,
+			)
+		}
+		if s.Loop != nil {
+			args = append(args,
+				"loop", tlog.FormatNext("%p"), s.Loop,
+				"cond", s.Cond,
+			)
+		}
+
+		tlog.Printw("state block", args...)
 	}
 
 	p(ss, nil)
@@ -217,6 +242,33 @@ loop:
 				"alt", tlog.FormatNext("%p"), t,
 				"prev", tlog.FormatNext("%p"), s,
 				"from", loc.Callers(1, 2))
+
+			s = next
+		case *ast.ForStmt:
+			r, err := fc.calcRhsExpr(ctx, s, x.Cond)
+			if err != nil {
+				return nil, errors.Wrap(err, "if cond")
+			}
+
+			alt := &State{
+				Prev: s,
+				Func: s.Func,
+				Vars: map[ast.Ident]int{},
+			}
+
+			t, err := fc.analyzeBlock(ctx, alt, x.Body)
+			if err != nil {
+				return nil, errors.Wrap(err, "if then")
+			}
+
+			next := &State{
+				Prev: s,
+				Func: s.Func,
+				Vars: map[ast.Ident]int{},
+
+				Cond: r.ID,
+				Loop: t,
+			}
 
 			s = next
 		default:
@@ -335,7 +387,15 @@ func (s *State) getVar(n ast.Ident) (id int, err error) {
 		}
 
 		var alt int = -1
+
 		for a := q.Alt; a != nil && a != q.Prev; a = a.Prev {
+			if id, ok := a.Vars[n]; ok {
+				alt = id
+				break
+			}
+		}
+
+		for a := q.Loop; a != nil && a != q.Prev; a = a.Prev {
 			if id, ok := a.Vars[n]; ok {
 				alt = id
 				break

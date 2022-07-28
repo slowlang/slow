@@ -28,3 +28,7 @@ Simplicity is prerequisite for reliability.
 ## Documentation
 
 * ARM - Learn the architecture - AArch64 Instruction Set Architecture ([developer.arm.com](https://developer.arm.com/documentation/102374/0100))
+
+## Courses
+
+* Dr. Ghassan Shobaki - CSC 151: Compiler Construction (California State University, Fall 2017) ([youtube](https://www.youtube.com/playlist?list=PL6KMWPQP_DM97Hh0PYNgJord-sANFTI3i))

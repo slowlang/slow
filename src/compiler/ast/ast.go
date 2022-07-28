@@ -54,6 +54,12 @@ type (
 		Elif *IfStmt
 	}
 
+	ForStmt struct {
+		Pos  int
+		Cond Expr
+		Body *Block
+	}
+
 	BinOp struct {
 		Op    Op
 		Left  Expr

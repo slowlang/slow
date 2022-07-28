@@ -13,10 +13,16 @@ func start(argc int) (rc int) {
 
 	// --- a0, b0, c0 -> c1
 
-	if a > b {
-		c = c + a
+//	if a > b {
+//		c = c + a
 //	} else {
 //		c = c + b
+//	}
+
+	i = 0
+	for i < 2 {
+		i = i + 1
+		c = c + 1
 	}
 
 //	if 2 < 1 {
@@ -41,6 +47,65 @@ func start(argc int) (rc int) {
 //func swap(a int, b int) (_ int, _ int) {
 //	return b, a
 //}
+
+/*
+func loop(a int, b int) (c int) {
+	c = 0
+
+	for a < b {
+		a++
+
+		if a % 2 == 0 {
+			b--
+		}
+
+		if a < 3 {
+			continue
+		}
+
+		if b == 5 {
+			break
+		}
+
+		c++
+	}
+
+	return c
+}
+
+	a, b // args
+
+	MOV     c, 0
+
+	B       cond
+
+loop:
+//	CMP		a, b
+//	BGE     loop_end
+
+	ADD     a, a, 1
+
+	TST     a, #1
+	SUB.EQ  b, b, #1
+
+	CMP     a, #3
+	BLT     loop
+
+	CMP     b, #5
+	BEQ     loop_end
+
+	ADD     c, c, 1
+
+//	B       loop
+
+cond:
+	CMP		a, b
+	BLT     loop
+
+loop_end:
+
+	RET
+*/
 
 /*
 func start0(argc int) (rc int) {

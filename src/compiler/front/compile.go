@@ -13,7 +13,7 @@ import (
 type (
 	Arch struct {
 		Args int
-		Regs [17]byte
+		Regs [100]byte
 	}
 )
 
