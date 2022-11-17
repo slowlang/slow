@@ -3,81 +3,55 @@ package back
 import (
 	"context"
 
-	"github.com/nikandfor/hacked/hfmt"
 	"github.com/slowlang/slow/src/compiler/ir"
 )
 
 type (
-	Arch interface{}
+	Back struct{}
+
+	Arch struct {
+		Regs []int
+		Expr map[int]int // expr -> reg
+		Used map[int]int // expr -> count
+	}
 )
 
-func Compile(ctx context.Context, p ir.Package) (asm []byte, err error) {
-	panic("qwe")
+func New() *Back {
+	return &Back{}
 }
 
-func compileFunc(ctx context.Context, b []byte, f ir.Func) ([]byte, error) {
-	b = hfmt.AppendPrintf(b, `
-.align 4
-.global _%s
-_%[1]s:
-	STP	FP, LR, [SP, #-16]!
-	MOV	FP, SP
+func (c *Back) CompilePackage(ctx context.Context, b []byte, p *ir.Package) (_ []byte, err error) {
+	//	a := NewArch()
 
-`, f.Name)
-
-	// todo
-
-	b = append(b, `
-	LDP	FP, LR, [SP], #16
-	RET
-`...)
-
-	return b, nil
-}
-
-func compileConst(ctx context.Context, b []byte, reg int, y ir.Word) (_ []byte) {
-	b = hfmt.AppendPrintf(b, "	MOV	X%v, #%d\n", reg, y.Value&0xffff)
-
-	for sh := 0; y.Value > 0xffff; sh += 16 {
-		y.Value >>= 16
-
-		b = hfmt.AppendPrintf(b, "	MOV	X%v, #%d, LSL #%d // Word\n", reg, y.Value&0xffff, sh)
-	}
-
-	return b
+	//	return c.compileFunc(ctx, a, b, p.Funcs[0])
+	return
 }
 
 /*
-func (s *State) Compile(ctx context.Context, a Arch) ([]byte, error) {
-	b, err := s.compileFunc(ctx, nil, a, s.prog.Funcs[0])
-	if err != nil {
-		return nil, err
+func (c *Back) compileFunc(ctx context.Context, a *Arch, b []byte, f *ir.Func) (_ []byte, err error) {
+	for i := range f.Args {
+		a.Alloc(i, i)
 	}
 
-	return b, nil
-}
-
-func (s *State) compileFunc(ctx context.Context, b []byte, a Arch, f *Func) ([]byte, error) {
 	b = hfmt.AppendPrintf(b, `
-.align 4
 .global _%s
+.align 4
 _%[1]s:
 	STP	FP, LR, [SP, #-16]!
 	MOV	FP, SP
 
+body:
 `, f.Name)
 
-	r, ok := f.syms[string(f.RetArgs[0].Name)]
-	if !ok {
-		return nil, errors.New("no expr for ret arg")
-	}
-
-	b, err := s.compileExpr(ctx, b, a, f, 0, r)
-	if err != nil {
-		return nil, err
+	for _, bl := range f.Blocks {
+		b, err = c.compileBlock(ctx, a, b, f, bl)
+		if err != nil {
+			return nil, errors.Wrap(err, "block")
+		}
 	}
 
 	b = append(b, `
+return:
 	LDP	FP, LR, [SP], #16
 	RET
 `...)
@@ -85,191 +59,184 @@ _%[1]s:
 	return b, nil
 }
 
-func (s *State) compileExpr(ctx context.Context, b []byte, a Arch, f *Func, reg int, e Expr) (_ []byte, err error) {
-	switch e := e.(type) {
-	case Word:
-		b = s.compileConst(ctx, b, a, reg, e)
-	case Arg:
-		if reg == e.Num {
-			return b, nil
-		}
+func (c *Back) compileBlock(ctx context.Context, a *Arch, b []byte, f *ir.Func, block *ir.Block) (_ []byte, err error) {
+	b = hfmt.AppendPrintf(b, "block_%v:\n", block.ID)
 
-		b = hfmt.AppendPrintf(b, "	MOV	X%d, X%d\n", reg, e.Num)
-	case BinOp:
-		b, err = s.compileExpr(ctx, b, a, f, reg+1, e.Left)
+	for _, s := range block.Stmts {
+		switch s := s.(type) {
+		case ir.Ret:
+			b, err = c.compileExpr(ctx, a, b, f, f.Exprs[s.Value])
+			if err != nil {
+				return nil, errors.Wrap(err, "return")
+			}
+
+			if a.Expr[s.Value] != 0 {
+				a.EnsureFree(0)
+
+				b = hfmt.AppendPrintf(b, "	MOV	X%d, X%d\n", 0, a.Expr[s.Value])
+				b = hfmt.AppendPrintf(b, "	B	return\n")
+			}
+
+			if a.Used[s.Value] == f.Exprs[s.Value].Used {
+				a.FreeExpr(s.Value)
+			}
+		case ir.IfStmt:
+			b, err = c.compileExpr(ctx, a, b, f, f.Exprs[s.Cond])
+			if err != nil {
+				return nil, errors.Wrap(err, "return")
+			}
+
+			b = hfmt.AppendPrintf(b, "	TBNZ	X%d, #0, block_%v\n", a.Expr[s.Cond], s.Branch)
+			b = hfmt.AppendPrintf(b, "	B	block_%v\n", block.Next)
+		default:
+			return nil, errors.New("unsupported stmt: %T", s)
+		}
+	}
+
+	return b, nil
+}
+
+func (c *Back) compileExpr(ctx context.Context, a *Arch, b []byte, f *ir.Func, e *ir.Expr) (_ []byte, err error) {
+	if _, ok := a.Expr[e.ID]; ok {
+		a.Used[e.ID]++
+
+		return b, nil
+	}
+
+	switch v := e.Value.(type) {
+	//case ir.Arg:
+	//	e.Reg = v.Num
+	case int64:
+		reg := a.AllocExpr(e.ID)
+
+		b = compileConst(ctx, b, reg, v)
+	case ir.BinOp:
+		b, err = c.compileExpr(ctx, a, b, f, f.Exprs[v.Left])
 		if err != nil {
 			return nil, errors.Wrap(err, "left")
 		}
 
-		switch e.Op {
-		case "+":
-			if y, ok := e.Right.(Word); ok && y.Value == 0 {
-				// nothing to do
-			} else if y.Value > 0 && y.Value < 1<<12 {
-				b = hfmt.AppendPrintf(b, "	ADD	X%d, X%d, #%d\n", reg, reg+1, y.Value)
-			} else {
-				b, err = s.compileExpr(ctx, b, a, f, reg+2, e.Right)
-				if err != nil {
-					return nil, errors.Wrap(err, "right")
-				}
+		b, err = c.compileExpr(ctx, a, b, f, f.Exprs[v.Right])
+		if err != nil {
+			return nil, errors.Wrap(err, "right")
+		}
 
-				b = hfmt.AppendPrintf(b, "	ADD	X%d, X%d, X%d\n", reg, reg+1, reg+2)
-			}
+		lreg := a.Expr[v.Left]
+		rreg := a.Expr[v.Right]
+
+		if a.Used[v.Left] == f.Exprs[v.Left].Used {
+			a.FreeExpr(v.Left)
+		}
+
+		if a.Used[v.Right] == f.Exprs[v.Right].Used {
+			a.FreeExpr(v.Right)
+		}
+
+		reg := a.AllocExpr(e.ID)
+
+		switch v.Op {
+		case "+":
+			b = hfmt.AppendPrintf(b, "	ADD	X%d, X%d, X%d	; expr %d\n", reg, lreg, rreg, e.ID)
+		case "<":
+			b = hfmt.AppendPrintf(b, "	CMP	X%d, X%d	; expr %d\n", lreg, rreg, e.ID)
+			b = hfmt.AppendPrintf(b, "	CSET	X%d, LT	; expr %d\n", reg, e.ID)
+		case ">":
+			b = hfmt.AppendPrintf(b, "	CMP	X%d, X%d	; expr %d\n", lreg, rreg, e.ID)
+			b = hfmt.AppendPrintf(b, "	CSET	X%d, GT	; expr %d\n", reg, e.ID)
 		default:
-			return nil, errors.New("unsupported op: %v", e.Op)
+			panic(v.Op)
 		}
 	default:
-		panic(e)
+		return nil, errors.New("unsupported expr: %T", v)
 	}
+
+	a.Used[e.ID]++
 
 	return b, nil
 }
 
-func (s *State) compileConst(ctx context.Context, b []byte, a Arch, reg int, y Word) (_ []byte) {
-	b = hfmt.AppendPrintf(b, "	MOV	X%v, #%d\n", reg, y.Value&0xffff)
+func compileConst(ctx context.Context, b []byte, reg int, y int64) (_ []byte) {
+	b = hfmt.AppendPrintf(b, "	MOV	X%v, #0x%x	; %[2]d\n", reg, y&0xffff)
 
-	for sh := 0; y.Value > 0xffff; sh += 16 {
-		y.Value >>= 16
+	for sh := 0; y > 0xffff; sh += 16 {
+		y >>= 16
 
-		b = hfmt.AppendPrintf(b, "	MOV	X%v, #%d, LSL #%d // Word\n", reg, y.Value&0xffff, sh)
+		b = hfmt.AppendPrintf(b, "	MOV	X%v, #0x%x, LSL #%d	; %[2]d\n", reg, y&0xffff, sh)
 	}
 
 	return b
 }
-*/
 
-/*
-func (s *State) Analyze(ctx context.Context) error {
-	err := s.analyzeFunc(ctx, s.prog.Funcs[0])
-	if err != nil {
-		return err
+func NewArch() *Arch {
+	a := &Arch{
+		Regs: make([]int, 30),
+		Expr: make(map[int]int),
+		Used: make(map[int]int),
 	}
 
-	return nil
+	for i := range a.Regs {
+		a.Regs[i] = len(a.Regs) - 1 - i
+	}
+
+	return a
 }
 
-func (s *State) analyzeFunc(ctx context.Context, f *Func) (ir.Func, error) {
-	f.syms = make(map[string]Expr)
-
-	for _, a := range f.Args {
-		f.syms[string(a.Name)] = a
+func (a *Arch) AllocExpr(e int) (r int) {
+	if r, ok := a.Expr[e]; ok {
+		tlog.V("reg,reg_alloc").Printw("reuse reg", "reg", r, "expr", e, "from", loc.Callers(1, 2))
+		return r
 	}
 
-	err := s.analyzeBlock(ctx, f, f.Body)
-	if err != nil {
-		return err
+	l := len(a.Regs) - 1
+	r = a.Regs[l]
+	a.Regs = a.Regs[:l]
+
+	a.Expr[e] = r
+
+	tlog.V("reg,reg_alloc").Printw("alloc reg", "reg", r, "expr", e, "from", loc.Callers(1, 2))
+
+	return r
+}
+
+func (a *Arch) Alloc(r, e int) {
+	for i, f := range a.Regs {
+		if f == r {
+			a.Expr[e] = r
+			tlog.V("reg,reg_alloc").Printw("alloc reg", "reg", r, "expr", e, "from", loc.Callers(1, 2))
+
+			l := len(a.Regs) - 1
+			if i < l {
+				copy(a.Regs[i:], a.Regs[i+1:])
+			}
+			a.Regs = a.Regs[:l]
+
+			return
+		}
 	}
 
-	ret, ok := f.syms[string(f.RetArgs[0].Name)]
+	panic("register is not available")
+}
+
+func (a *Arch) FreeExpr(e int) {
+	r, ok := a.Expr[e]
 	if !ok {
-		return errors.New("no result")
+		panic("unknown expr freed")
 	}
 
-	tlog.SpanFromContext(ctx).Printw("func", "name", f.Name, "result", ret)
-	tlog.SpanFromContext(ctx).Printw("func", "syms", f.syms)
+	a.Regs = append(a.Regs, r)
+	delete(a.Expr, e)
+	//	delete(a.Used, e)
 
-	return nil
+	tlog.V("reg,reg_free").Printw("free reg", "reg", r, "expr", e, "from", loc.Callers(1, 2))
 }
 
-func (s *State) analyzeBlock(ctx context.Context, f *Func, b *Block) (err error) {
-	for _, st := range b.Stmts {
-		var pos int
-
-		switch st := st.(type) {
-		case Assignment:
-			pos = st.Pos
-			err = s.analyzeAssignment(ctx, f, st)
-		case Return:
-			pos = st.Pos
-			err = s.analyzeReturn(ctx, f, st)
-		default:
-			return errors.New("unsupported statement: %T", st)
-		}
-
-		if err != nil {
-			return errors.Wrap(err, "at pos 0x%x", pos)
+func (a *Arch) EnsureFree(r int) {
+	for _, f := range a.Regs {
+		if f == r {
+			return
 		}
 	}
 
-	return nil
-}
-
-func (s *State) analyzeReturn(ctx context.Context, f *Func, r Return) error {
-	e, err := s.analyzeRhsExpr(ctx, f, r.Value)
-	if err != nil {
-		return err
-	}
-
-	tlog.SpanFromContext(ctx).Printw("return", "val", r.Value, "expr", e)
-
-	f.syms[string(f.RetArgs[0].Name)] = e
-
-	return nil
-}
-
-func (s *State) analyzeAssignment(ctx context.Context, f *Func, a Assignment) error {
-	name, err := s.analyzeLhsExpr(ctx, f, a.Lhs)
-	if err != nil {
-		return err
-	}
-
-	e, err := s.analyzeRhsExpr(ctx, f, a.Rhs)
-	if err != nil {
-		return err
-	}
-
-	f.syms[string(name.(Ident))] = e
-
-	tlog.SpanFromContext(ctx).Printw("assign", "lhs", a.Lhs, "rhs", a.Rhs, "expr", e)
-
-	return nil
-}
-
-func (s *State) analyzeLhsExpr(ctx context.Context, f *Func, e Expr) (Expr, error) {
-	switch e := e.(type) {
-	case Ident:
-		return e, nil
-	case Number:
-		return nil, errors.New("rhs expected, got %v", e)
-	default:
-		panic(e)
-	}
-}
-
-func (s *State) analyzeRhsExpr(ctx context.Context, f *Func, e Expr) (Expr, error) {
-	switch e := e.(type) {
-	case Word:
-		return e, nil
-	case Number:
-		v, err := strconv.ParseInt(string(e), 10, 64)
-		if err != nil {
-			return nil, errors.Wrap(err, "parse int")
-		}
-
-		return Word{Value: v}, nil
-	case Ident:
-		r, ok := f.syms[string(e)]
-		if !ok {
-			return nil, errors.New("unknown symbol: %q", e)
-		}
-
-		return s.analyzeRhsExpr(ctx, f, r)
-	case Arg:
-		return e, nil
-	case BinOp:
-		l, err := s.analyzeRhsExpr(ctx, f, e.Left)
-		if err != nil {
-			return nil, errors.Wrap(err, "analyze left")
-		}
-
-		r, err := s.analyzeRhsExpr(ctx, f, e.Right)
-		if err != nil {
-			return nil, errors.Wrap(err, "analyze right")
-		}
-
-		return BinOp{Op: e.Op, Left: l, Right: r}, nil
-	default:
-		panic(e)
-	}
+	panic("register is not available")
 }
 */

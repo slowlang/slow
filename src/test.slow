@@ -1,9 +1,9 @@
 func start(argc int) (rc int) {
 	// --- argc(0) -> a0, b0, c0
 
-//	if 2 < 1 {
-//		return 2
-//	}
+	if argc < 1 {
+		return 2
+	}
 
 	a = argc
 	b = 1
@@ -13,17 +13,17 @@ func start(argc int) (rc int) {
 
 	// --- a0, b0, c0 -> c1
 
-//	if a > b {
-//		c = c + a
-//	} else {
-//		c = c + b
-//	}
-
-	i = 0
-	for i < 2 {
-		i = i + 1
-		c = c + 1
+	if a > b {
+		c = c + a
+	} else {
+		c = c + b
 	}
+
+//	i = 0
+//	for i < 2 {
+//		i = i + 1
+//		c = c + 1
+//	}
 
 //	if 2 < 1 {
 //		return 1
@@ -47,6 +47,19 @@ func start(argc int) (rc int) {
 //func swap(a int, b int) (_ int, _ int) {
 //	return b, a
 //}
+
+/*
+func arraySum(a []int) (sum int) {
+	i = 0
+	for i < len(a) {
+		sum += a[i]
+
+		i++
+	}
+
+	return sum
+}
+*/
 
 /*
 func loop(a int, b int) (c int) {

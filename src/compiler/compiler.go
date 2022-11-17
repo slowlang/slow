@@ -8,6 +8,7 @@ import (
 	"github.com/nikandfor/tlog"
 
 	"github.com/slowlang/slow/src/compiler/ast"
+	"github.com/slowlang/slow/src/compiler/back"
 	"github.com/slowlang/slow/src/compiler/front"
 )
 
@@ -48,32 +49,26 @@ func CompileFile(ctx context.Context, name string) (obj []byte, err error) {
 }
 
 func Compile(ctx context.Context, name string, text []byte) (obj []byte, err error) {
-	c := front.New()
+	f := front.New()
 
-	c.AddFile(ctx, name, text)
+	f.AddFile(ctx, name, text)
 
-	err = c.Parse(ctx)
+	err = f.Parse(ctx)
 	if err != nil {
-		//	tlog.SpanFromContext(ctx).Printw("abstract syntax tree", "x_type", tlog.FormatNext("%T"), x, "x", x, "err", err)
 		return nil, errors.Wrap(err, "parse text")
 	}
 
-	err = c.Analyze(ctx)
+	p, err := f.Analyze(ctx)
 	if err != nil {
-		return nil, errors.Wrap(err, "front analyze")
+		return nil, errors.Wrap(err, "analyze")
 	}
 
-	obj, err = c.Compile(ctx, nil)
-	if err != nil {
-		return nil, errors.Wrap(err, "front compile")
-	}
+	b := back.New()
 
-	/*
-		obj, err = st.Compile(ctx, &front.ARM64A{})
-		if err != nil {
-			return nil, errors.Wrap(err, "compile")
-		}
-	*/
+	obj, err = b.CompilePackage(ctx, nil, p)
+	if err != nil {
+		return nil, errors.Wrap(err, "compile")
+	}
 
 	return obj, nil
 }

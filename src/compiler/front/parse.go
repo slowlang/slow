@@ -20,13 +20,7 @@ type (
 		files []*File
 	}
 
-	Word struct {
-		Value int64
-	}
-
 	Token interface{}
-	Expr  interface{}
-	Stmt  interface{}
 
 	Char    byte
 	Keyword string
@@ -35,8 +29,8 @@ type (
 		name string
 		base int
 
-		parsed   *ast.File
-		analyzed []*FuncScope
+		parsed *ast.File
+		//	analyzed []*FuncScope
 	}
 
 	Num struct {
@@ -225,7 +219,7 @@ loop:
 			i = j
 		}
 
-		var stmt Stmt
+		var stmt ast.Stmt
 		stmt, i, err = fc.parseStatement(ctx, i)
 		if err != nil {
 			return
@@ -270,7 +264,17 @@ func (fc *Front) parseReturn(ctx context.Context, st, vst int) (x ast.Stmt, i in
 	return ast.Return{Pos: st, Value: exp}, i, nil
 }
 
-func (fc *Front) parseIf(ctx context.Context, st, vst int) (x ast.Stmt, i int, err error) {
+func (fc *Front) parseIf(ctx context.Context, st, vst int) (x *ast.IfStmt, i int, err error) {
+	defer func() {
+		if tr := tlog.SpanFromContext(ctx); tr.Logger != nil {
+			if x == nil {
+				tr.Printw("if stmt", "err", err)
+			} else {
+				tr.Printw("if stmt", "cond", x.Cond, "then", x.Then, "else", x.Else, "elif", x.Elif)
+			}
+		}
+	}()
+
 	exp, i, err := fc.parseExpr(ctx, vst)
 	if err != nil {
 		return nil, i, errors.Wrap(err, "condition")
@@ -281,9 +285,27 @@ func (fc *Front) parseIf(ctx context.Context, st, vst int) (x ast.Stmt, i int, e
 		return nil, i, errors.Wrap(err, "then block")
 	}
 
-	tlog.SpanFromContext(ctx).Printw("if stmt", "cond", exp, "then", b)
+	tk, _, e := fc.next(ctx, i)
+	if tk != Keyword("else") {
+		return &ast.IfStmt{Pos: st, Cond: exp, Then: b}, i, nil
+	}
 
-	return &ast.IfStmt{Pos: st, Cond: exp, Then: b}, i, nil
+	tk, _, i = fc.next(ctx, e)
+	if tk == Char('{') {
+		b2, i, err := fc.parseBlock(ctx, e)
+		if err != nil {
+			return nil, i, errors.Wrap(err, "else block")
+		}
+
+		return &ast.IfStmt{Pos: st, Cond: exp, Then: b, Else: b2}, i, nil
+	}
+
+	x, i, err = fc.parseIf(ctx, e, i)
+	if err != nil {
+		return nil, i, errors.Wrap(err, "elif")
+	}
+
+	return &ast.IfStmt{Pos: st, Cond: exp, Then: b, Elif: x}, i, nil
 }
 
 func (fc *Front) parseFor(ctx context.Context, st, vst int) (x ast.Stmt, i int, err error) {
@@ -377,7 +399,7 @@ func (fc *Front) parseSum(ctx context.Context, st int) (x ast.Expr, i int, err e
 			break
 		}
 
-		var rarg Expr
+		var rarg ast.Expr
 		rarg, i, err = fc.parseMul(ctx, e)
 		if err != nil {
 			return nil, i, errors.Wrap(err, "mul")
@@ -407,7 +429,7 @@ func (fc *Front) parseMul(ctx context.Context, st int) (_ ast.Expr, i int, err e
 			break
 		}
 
-		var rarg Expr
+		var rarg ast.Expr
 		rarg, i, err = fc.parseExprArg(ctx, e)
 		if err != nil {
 			return nil, i, errors.Wrap(err, "arg")
