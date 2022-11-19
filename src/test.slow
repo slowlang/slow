@@ -1,9 +1,9 @@
 func start(argc int) (rc int) {
 	// --- argc(0) -> a0, b0, c0
 
-	if argc < 1 {
-		return 2
-	}
+//	if argc < 1 {
+//		return 2
+//	}
 
 	a = argc
 	b = 1
@@ -15,8 +15,8 @@ func start(argc int) (rc int) {
 
 	if a > b {
 		c = c + a
-	} else {
-		c = c + b
+//	} else {
+//		c = c + b
 	}
 
 //	i = 0

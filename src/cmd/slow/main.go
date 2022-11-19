@@ -11,16 +11,9 @@ import (
 	"github.com/nikandfor/tlog/ext/tlflag"
 	"github.com/nikandfor/tlog/tlio"
 	"github.com/slowlang/slow/src/compiler"
-	"github.com/slowlang/slow/src/compiler/format"
 )
 
 func main() {
-	parseCmd := &cli.Command{
-		Name:   "parse",
-		Action: parseAct,
-		Args:   cli.Args{},
-	}
-
 	compileCmd := &cli.Command{
 		Name:   "compile",
 		Action: compileAct,
@@ -41,7 +34,6 @@ func main() {
 			cli.EnvfileFlag,
 		},
 		Commands: []*cli.Command{
-			parseCmd,
 			compileCmd,
 		},
 	}
@@ -76,31 +68,6 @@ func before(c *cli.Command) (err error) {
 				w.MessageWidth = 20
 			}
 		}
-	}
-
-	return nil
-}
-
-func parseAct(c *cli.Command) (err error) {
-	ctx := context.Background()
-	ctx = tlog.ContextWithSpan(ctx, tlog.Root())
-
-	for _, a := range c.Args {
-		x, err := compiler.ParseFile(ctx, a)
-		if err != nil {
-			return errors.Wrap(err, "parse %v", a)
-		}
-
-		b, err := format.Format(ctx, nil, x)
-		if err != nil {
-			return errors.Wrap(err, "format %v", a)
-		}
-
-		if len(c.Args) > 1 {
-			fmt.Printf("// %s\n", a)
-		}
-
-		fmt.Printf("%s", b)
 	}
 
 	return nil
