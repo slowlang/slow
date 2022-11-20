@@ -3,13 +3,15 @@ package ir
 type (
 	Word uint64
 	Expr int
-	Cond int
+	Arg  int
+	Cond string
 
-	Param struct{}
+	Param struct {
+		Expr Expr
+	}
 
 	Phi struct {
-		Cond Cond
-		Expr Expr
+		Cond Expr
 		Then Expr
 		Else Expr
 	}
@@ -20,6 +22,7 @@ type (
 	}
 
 	Cmp struct {
+		Cond  Cond
 		Left  Expr
 		Right Expr
 	}
@@ -28,7 +31,6 @@ type (
 		Name string
 		In   []Param
 		Out  []Param
-		//	Body Expr
 
 		Exprs []any
 	}

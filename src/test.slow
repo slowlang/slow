@@ -1,4 +1,4 @@
-func start(argc int) (rc int) {
+func main(argc int) (rc int) {
 	// --- argc(0) -> a0, b0, c0
 
 //	if argc < 1 {

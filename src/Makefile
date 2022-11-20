@@ -1,8 +1,5 @@
 
 
-.PHONY: run_test
-run_test: run_%
-
 run_%: %.out
 	./$<
 
