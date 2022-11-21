@@ -13,13 +13,14 @@ import (
 
 type (
 	state struct {
-		*ir.Func
+		f     *ir.Func
+		block int
 
-		vars map[string]ir.Expr
+		vars  map[string]ir.Expr
+		cache map[any]ir.Expr
 
-		cond ir.Expr
-		then *state
-		els  *state
+		par  []*state
+		exit *state
 	}
 )
 
@@ -45,25 +46,41 @@ func (c *Front) compileFunc(ctx context.Context, p *ir.Package, fn *ast.Func) (e
 		Out:  make([]ir.Param, len(fn.RetArgs)),
 	}
 
-	s := newState(f, nil)
+	exit := newState(f)
+
+	s := newState(f)
+	s.exit = exit
 
 	for i, p := range fn.Args {
 		e := ir.Arg(i)
 		id := ir.Expr(len(f.Exprs))
 
 		f.Exprs = append(f.Exprs, e)
+		f.In[i].Name = string(p.Name)
 		f.In[i].Expr = id
 
 		s.vars[string(p.Name)] = id
+		if b := &s.f.Blocks[s.block]; true {
+			b.In = append(b.In, id)
+		}
 	}
 
-	for i := range fn.RetArgs {
+	for i, p := range fn.RetArgs {
+		f.Out[i].Name = string(p.Name)
 		f.Out[i].Expr = -1
 	}
 
 	err = c.compileBlock(ctx, s, fn.Body)
 	if err != nil {
 		return err
+	}
+
+	for i, r := range fn.RetArgs {
+		id := exit.findVar(string(r.Name), nil)
+
+		f.Out[i].Expr = id
+
+		exit.markVar(id, nil)
 	}
 
 	p.Funcs = append(p.Funcs, f)
@@ -74,6 +91,25 @@ func (c *Front) compileFunc(ctx context.Context, p *ir.Package, fn *ast.Func) (e
 func (c *Front) compileBlock(ctx context.Context, f *state, b *ast.Block) (err error) {
 	for _, s := range b.Stmts {
 		switch s := s.(type) {
+		case ast.Return:
+			id, err := c.compileRExpr(ctx, f, s.Value)
+			if err != nil {
+				return errors.Wrap(err, "return")
+			}
+
+			tlog.Printw("return", "expr", id)
+
+			f.vars[f.f.Out[0].Name] = id
+
+			f.exit.par = append(f.exit.par, f)
+
+			if b := f.bref(); true {
+				//	b.Ops = append(b.Ops, ir.Branch{Block: f.exit.block})
+				b.Next = f.exit.block
+
+				f.markVar(id, f.exit)
+				//	f.exit.markVar(id, nil)
+			}
 		case ast.Assignment:
 			id, err := c.compileRExpr(ctx, f, s.Rhs)
 			if err != nil {
@@ -87,24 +123,22 @@ func (c *Front) compileBlock(ctx context.Context, f *state, b *ast.Block) (err e
 
 			f.vars[string(v)] = id
 		case *ast.IfStmt:
-			condExpr, err := c.compileRExpr(ctx, f, s.Cond)
+			cond, condExpr, err := c.compileCond(ctx, f, s.Cond)
 			if err != nil {
 				return errors.Wrap(err, "if cond")
 			}
 
-			thenState := newState(f.Func, f)
+			thenState := newState(f.f, f)
 
 			err = c.compileBlock(ctx, thenState, s.Then)
 			if err != nil {
 				return errors.Wrap(err, "if then")
 			}
 
-			var elseState *state
+			var elseState *state = f
 
-			if s.Else == nil {
-				elseState = f
-			} else {
-				elseState = newState(f.Func, f)
+			if s.Else != nil {
+				elseState = newState(f.f, f)
 
 				err = c.compileBlock(ctx, elseState, s.Else)
 				if err != nil {
@@ -112,16 +146,26 @@ func (c *Front) compileBlock(ctx context.Context, f *state, b *ast.Block) (err e
 				}
 			}
 
-			f = newStateMerge(f.Func, condExpr, thenState, elseState)
-		case ast.Return:
-			id, err := c.compileRExpr(ctx, f, s.Value)
-			if err != nil {
-				return errors.Wrap(err, "return")
+			if b := f.bref(); true {
+				b.Ops = append(b.Ops, ir.BranchIf{Cond: cond, Expr: condExpr, Block: thenState.block})
+				//	b.Ops = append(b.Ops, ir.Branch{Block: elseState.block})
+				b.Next = elseState.block
 			}
 
-			tlog.Printw("return", "expr", id)
+			next := newState(f.f, thenState, elseState)
 
-			f.Func.Out[0].Expr = id
+			tlog.Printw("branch", "base", f.block, "then", thenState.block, "else", elseState.block, "next", next.block)
+
+			if b := thenState.bref(); true {
+				//	b.Ops = append(b.Ops, ir.Branch{Block: next.block})
+				b.Next = next.block
+			}
+			if b := elseState.bref(); elseState != f {
+				//	b.Ops = append(b.Ops, ir.Branch{Block: next.block})
+				b.Next = next.block
+			}
+
+			f = next
 		default:
 			return errors.New("unsupported statement: %T", s)
 		}
@@ -134,10 +178,28 @@ func (c *Front) compileBlock(ctx context.Context, f *state, b *ast.Block) (err e
 	return nil
 }
 
+func (c *Front) compileCond(ctx context.Context, s *state, e ast.Expr) (cc ir.Cond, id ir.Expr, err error) {
+	switch e := e.(type) {
+	case ast.BinOp:
+		switch e.Op {
+		case "<", ">":
+			cc = ir.Cond(e.Op)
+		default:
+			return "", -1, errors.New("unsupported op: %q", e.Op)
+		}
+	default:
+		return "", -1, errors.New("unsupported expr: %T", e)
+	}
+
+	id, err = c.compileRExpr(ctx, s, e)
+
+	return
+}
+
 func (c *Front) compileRExpr(ctx context.Context, s *state, e ast.Expr) (id ir.Expr, err error) {
 	switch e := e.(type) {
 	case ast.Ident:
-		id = s.findVar(string(e))
+		id = s.findVar(string(e), nil)
 		if id < 0 {
 			return id, errors.New("undefined var: %s", e)
 		}
@@ -167,9 +229,8 @@ func (c *Front) compileRExpr(ctx context.Context, s *state, e ast.Expr) (id ir.E
 				Left:  l,
 				Right: r,
 			})
-		case ">":
+		case "<", ">":
 			id = s.alloc(ir.Cmp{
-				Cond:  ir.Cond(e.Op),
 				Left:  l,
 				Right: r,
 			})
@@ -183,62 +244,112 @@ func (c *Front) compileRExpr(ctx context.Context, s *state, e ast.Expr) (id ir.E
 	return
 }
 
-func newState(f *ir.Func, par *state) *state {
+func newState(f *ir.Func, par ...*state) *state {
 	s := &state{
-		Func: f,
+		f:    f,
 		vars: make(map[string]ir.Expr),
+		par:  par,
 	}
 
-	if par != nil {
-		s.cond = -1
-		s.then = par
+	s.block = len(f.Blocks)
+	f.Blocks = append(f.Blocks, ir.Block{Next: -1})
+
+	if len(par) == 0 {
+		s.cache = make(map[any]ir.Expr)
+	} else {
+		s.cache = par[0].cache
+		s.exit = par[0].exit
 	}
-
-	return s
-}
-
-func newStateMerge(f *ir.Func, cond ir.Expr, t, e *state) *state {
-	s := newState(f, nil)
-
-	s.cond = cond
-	s.then = t
-	s.els = e
 
 	return s
 }
 
 func (s *state) alloc(x any) (id ir.Expr) {
-	id = ir.Expr(len(s.Func.Exprs))
+	if id, ok := s.cache[x]; ok {
+		return id
+	}
 
-	s.Func.Exprs = append(s.Func.Exprs, x)
+	id = ir.Expr(len(s.f.Exprs))
+	s.cache[x] = id
+
+	s.f.Exprs = append(s.f.Exprs, x)
 
 	return id
 }
 
-func (s *state) findVar(n string) (id ir.Expr) {
+func (s *state) findVar(n string, from *state) (id ir.Expr) {
+	if from != nil {
+		defer func() { s.markVar(id, from) }()
+	}
+
 	id, ok := s.vars[n]
 	if ok {
 		return id
 	}
 
-	if s.then == nil {
+	if len(s.par) == 0 {
 		return -1
 	}
 
-	if s.els == nil {
-		return s.then.findVar(n)
+	id = s.par[0].findVar(n, s)
+
+	var phi ir.Phi
+
+parents:
+	for _, p := range s.par[1:] {
+		alt := p.findVar(n, s)
+		if alt == id {
+			continue
+		}
+		for _, p := range phi {
+			if alt == p {
+				continue parents
+			}
+		}
+
+		if len(phi) == 0 {
+			phi = append(phi, id)
+		}
+
+		phi = append(phi, alt)
 	}
 
-	t := s.then.findVar(n)
-	e := s.els.findVar(n)
-
-	if t == e {
-		return t
+	if len(phi) == 0 {
+		return id
 	}
 
-	return s.alloc(ir.Phi{
-		Cond: s.cond,
-		Then: t,
-		Else: e,
-	})
+	id = ir.Expr(len(s.f.Exprs))
+	s.f.Exprs = append(s.f.Exprs, phi)
+
+	s.vars[n] = id
+
+	return id
+}
+
+func (s *state) markVar(id ir.Expr, from *state) {
+	if b := s.bref(); !exprIn(id, b.Out) {
+		b.Out = append(b.Out, id)
+	}
+
+	if from == nil {
+		return
+	}
+
+	if b := from.bref(); !exprIn(id, b.In) {
+		b.In = append(b.In, id)
+	}
+}
+
+func (s *state) bref() *ir.Block {
+	return &s.f.Blocks[s.block]
+}
+
+func exprIn(e ir.Expr, in []ir.Expr) bool {
+	for _, x := range in {
+		if e == x {
+			return true
+		}
+	}
+
+	return false
 }

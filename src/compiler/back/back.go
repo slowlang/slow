@@ -5,17 +5,29 @@ import (
 	"fmt"
 
 	"github.com/nikandfor/errors"
+	"github.com/nikandfor/tlog"
 
 	"github.com/slowlang/slow/src/compiler/ir"
 )
 
 type (
 	Arch interface {
+		Alloc(e ir.Expr) int
+		Free(reg int)
 	}
 
 	Compiler struct{}
 
-	Expr any
+	state struct {
+		f *ir.Func
+
+		deps map[int][]int
+
+		//	hint     map[ir.Expr]int
+		compiled map[int]struct{}
+
+		reg int
+	}
 )
 
 func New() *Compiler { return nil }
@@ -53,20 +65,29 @@ func (c *Compiler) compileFunc(ctx context.Context, a Arch, b []byte, f *ir.Func
 %[1]s:
 	STP     FP, LR, [SP, #-16]!
 	MOV     FP, SP
-
 `, f.Name)
 
-	for i, p := range f.Out {
-		b, err = c.compileExpr(ctx, a, b, f, p.Expr, len(f.In)+i, nil)
-		if err != nil {
-			return nil, errors.Wrap(err, "")
-		}
+	s := &state{
+		f:    f,
+		deps: map[int][]int{},
+		//	hint:     map[ir.Expr]int{},
+		compiled: map[int]struct{}{},
+		reg:      len(f.In),
 	}
 
-	b = append(b, "\n"...)
+	for id := range f.Blocks {
+		c.calcDeps(ctx, a, s, id)
+	}
 
-	for i := range f.Out {
-		b = fmt.Appendf(b, "	MOV	X%d, X%d	// move result\n", i, len(f.In)+i)
+	tlog.Printw("block deps", "block_deps", s.deps)
+
+	//	for i, p := range f.Out {
+	//		s.hint[p.Expr] = i
+	//	}
+
+	b, err = c.compileBlock(ctx, a, b, s, 0)
+	if err != nil {
+		return nil, errors.Wrap(err, "")
 	}
 
 	b = fmt.Appendf(b, `
@@ -78,12 +99,109 @@ ret_%s:
 	return b, nil
 }
 
-func (c *Compiler) compileExpr(ctx context.Context, a Arch, b []byte, f *ir.Func, e ir.Expr, reg int, cond *string) (_ []byte, err error) {
+func (c *Compiler) calcDeps(ctx context.Context, a Arch, s *state, block int) {
+	bp := &s.f.Blocks[block]
+
+	if bp.Next >= 0 {
+		s.addDep(bp.Next, block)
+	}
+
+	for _, op := range bp.Ops {
+		switch op := op.(type) {
+		//	case ir.Branch:
+		//		s.addDep(op.Block, block)
+		case ir.BranchIf:
+			s.addDep(op.Block, block)
+		}
+	}
+}
+
+func (c *Compiler) compileBlock(ctx context.Context, a Arch, b []byte, s *state, block int) (_ []byte, err error) {
+	if _, ok := s.compiled[block]; ok {
+		return b, nil
+	}
+
+	s.compiled[block] = struct{}{}
+
+	buf, err := c.compileBlockData(ctx, a, nil, s, block)
+	if err != nil {
+		return nil, errors.Wrap(err, "")
+	}
+
+	for _, d := range s.deps[block] {
+		b, err = c.compileBlock(ctx, a, b, s, d)
+		if err != nil {
+			return nil, errors.Wrap(err, "")
+		}
+	}
+
+	b = append(b, buf...)
+
+	return b, nil
+}
+
+func (c *Compiler) compileBlockData(ctx context.Context, a Arch, b []byte, s *state, block int) (_ []byte, err error) {
+	bp := &s.f.Blocks[block]
+
+	b = fmt.Appendf(b, "\nblock_%d:\n", block)
+
+	for _, e := range bp.Out {
+		_, b, err = c.compileExpr(ctx, a, b, s, e, block)
+		if err != nil {
+			return nil, errors.Wrap(err, "")
+		}
+	}
+
+	for _, op := range bp.Ops {
+		switch op := op.(type) {
+		case ir.BranchIf:
+			_, b, err = c.compileExpr(ctx, a, b, s, op.Expr, block)
+			if err != nil {
+				return
+			}
+
+			cond := ""
+
+			switch op.Cond {
+			case "<":
+				cond = "LS"
+			case ">":
+				cond = "GT"
+			default:
+				return nil, errors.New("unsupported operation: %q", op.Cond)
+			}
+
+			b = fmt.Appendf(b, "	B.%s	block_%d\n", cond, op.Block)
+		default:
+			return nil, errors.New("unsupported op: %T", op)
+		}
+	}
+
+	if bp.Next >= 0 {
+		b = fmt.Appendf(b, "	B	block_%d\n", bp.Next)
+	}
+
+	return b, nil
+}
+
+func (c *Compiler) compileExpr(ctx context.Context, a Arch, b []byte, s *state, e ir.Expr, block int) (reg int, _ []byte, err error) {
 	//	b = fmt.Appendf(b, "	// X%d <- expr %d  %T%[3]v\n", reg, e, f.Exprs[e])
 
-	switch x := f.Exprs[e].(type) {
+	reg = s.reg
+	s.reg++
+
+	tlog.Printw("alloc reg", "reg", reg, "expr", e, "block", block)
+
+	bp := &s.f.Blocks[block]
+	if exprIn(e, bp.In) {
+		return reg, b, nil
+	}
+
+	//	reg := a.Alloc(e)
+
+	switch x := s.f.Exprs[e].(type) {
 	case ir.Word:
-		b = fmt.Appendf(b, "	MOV	X%d, #%d\n", reg, x)
+		b = fmt.Appendf(b, "	MOV	X%d, #%d	// expr %d\n", reg, x, e)
 	case ir.Arg:
 		if int(x) != reg {
 			b = fmt.Appendf(b, "	MOV	X%d, X%d	// arg %d\n", reg, x, x)
@@ -91,71 +209,61 @@ func (c *Compiler) compileExpr(ctx context.Context, a Arch, b []byte, f *ir.Func
 			b = fmt.Appendf(b, "	// arg %d is already in place\n", x)
 		}
 	case ir.Phi:
-		b = fmt.Appendf(b, "	// if_%d\n", e)
-
-		var cond string
-
-		b, err = c.compileExpr(ctx, a, b, f, x.Cond, reg, &cond)
-		if err != nil {
-			return
-		}
-
-		b = fmt.Appendf(b, "	B.%s	then_%d\n", cond, e)
-		b = fmt.Appendf(b, "	B	else_%d\n", e)
-
-		b = fmt.Appendf(b, "then_%d:\n", e)
-
-		b, err = c.compileExpr(ctx, a, b, f, x.Then, reg, nil)
-		if err != nil {
-			return
-		}
-
-		b = fmt.Appendf(b, "	B	endif_%d\n", e)
-
-		b = fmt.Appendf(b, "else_%d:\n", e)
-
-		b, err = c.compileExpr(ctx, a, b, f, x.Else, reg, nil)
-		if err != nil {
-			return
-		}
-
-		b = fmt.Appendf(b, "endif_%d:\n", e)
+		b = fmt.Appendf(b, "	// X%d is %v	// expr %d\n", reg, x, e)
+	//	for _, e := range x {
+	//		s.hint[e] = reg
+	//	}
 	case ir.Cmp:
-		b, err = c.compileExpr(ctx, a, b, f, x.Left, reg+1, nil)
+		var lr, rr int
+
+		lr, b, err = c.compileExpr(ctx, a, b, s, x.Left, block) //, reg+1)
 		if err != nil {
 			return
 		}
 
-		b, err = c.compileExpr(ctx, a, b, f, x.Right, reg+2, nil)
+		rr, b, err = c.compileExpr(ctx, a, b, s, x.Right, block) //, reg+2)
 		if err != nil {
 			return
 		}
 
-		switch x.Cond {
-		case "<":
-			*cond = "LS"
-		case ">":
-			*cond = "GT"
-		default:
-			return nil, errors.New("unsupported operation: %q", x.Cond)
-		}
-
-		b = fmt.Appendf(b, "	CMP	X%d, X%d\n", reg+1, reg+2)
+		b = fmt.Appendf(b, "	CMP	X%d, X%d\n", lr, rr)
 	case ir.Add:
-		b, err = c.compileExpr(ctx, a, b, f, x.Left, reg, nil)
+		var lr, rr int
+
+		lr, b, err = c.compileExpr(ctx, a, b, s, x.Left, block) //, reg)
 		if err != nil {
 			return
 		}
 
-		b, err = c.compileExpr(ctx, a, b, f, x.Right, reg+1, nil)
+		rr, b, err = c.compileExpr(ctx, a, b, s, x.Right, block) //, reg+1)
 		if err != nil {
 			return
 		}
 
-		b = fmt.Appendf(b, "	ADD	X%d, X%d, X%d	// expr %d\n", reg, reg, reg+1, e)
+		b = fmt.Appendf(b, "	ADD	X%d, X%d, X%d	// expr %d\n", reg, lr, rr, e)
 	default:
-		return nil, errors.New("unsupported expr: %T", x)
+		return 0, nil, errors.New("unsupported expr: %T", x)
 	}
 
-	return b, nil
+	return reg, b, nil
+}
+
+func (s *state) addDep(b, dep int) {
+	for _, d := range s.deps[b] {
+		if dep == d {
+			return
+		}
+	}
+
+	s.deps[b] = append(s.deps[b], dep)
+}
+
+func exprIn(e ir.Expr, in []ir.Expr) bool {
+	for _, x := range in {
+		if e == x {
+			return true
+		}
+	}
+
+	return false
 }

@@ -7,14 +7,11 @@ type (
 	Cond string
 
 	Param struct {
+		Name string
 		Expr Expr
 	}
 
-	Phi struct {
-		Cond Expr
-		Then Expr
-		Else Expr
-	}
+	Phi []Expr
 
 	Add struct {
 		Left  Expr
@@ -22,7 +19,6 @@ type (
 	}
 
 	Cmp struct {
-		Cond  Cond
 		Left  Expr
 		Right Expr
 	}
@@ -32,12 +28,32 @@ type (
 		In   []Param
 		Out  []Param
 
-		Exprs []any
+		Exprs  []any
+		Blocks []Block
+	}
+
+	Block struct {
+		In  []Expr
+		Out []Expr
+
+		Ops []any
+
+		Next int
 	}
 
 	Package struct {
 		Path string
 
 		Funcs []*Func
+	}
+
+	//	Branch struct {
+	//		Block int
+	//	}
+
+	BranchIf struct {
+		Cond  Cond
+		Expr  Expr
+		Block int
 	}
 )
