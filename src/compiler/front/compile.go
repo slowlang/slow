@@ -92,26 +92,24 @@ func (c *Front) compileBlock(ctx context.Context, f *state, b *ast.Block) (err e
 	for _, s := range b.Stmts {
 		switch s := s.(type) {
 		case ast.Return:
-			id, err := c.compileRExpr(ctx, f, s.Value)
+			id, err := c.compileExpr(ctx, f, s.Value)
 			if err != nil {
 				return errors.Wrap(err, "return")
 			}
 
-			tlog.Printw("return", "expr", id)
-
 			f.vars[f.f.Out[0].Name] = id
-
 			f.exit.par = append(f.exit.par, f)
+			//	f.markVar(id, f.exit)
 
 			if b := f.bref(); true {
-				//	b.Ops = append(b.Ops, ir.Branch{Block: f.exit.block})
-				b.Next = f.exit.block
+				id := f.alloc(ir.Branch{
+					Block: f.exit.block,
+				})
 
-				f.markVar(id, f.exit)
-				//	f.exit.markVar(id, nil)
+				b.Code = append(b.Code, id)
 			}
 		case ast.Assignment:
-			id, err := c.compileRExpr(ctx, f, s.Rhs)
+			id, err := c.compileExpr(ctx, f, s.Rhs)
 			if err != nil {
 				return errors.Wrap(err, "assignment rhs")
 			}
@@ -147,9 +145,23 @@ func (c *Front) compileBlock(ctx context.Context, f *state, b *ast.Block) (err e
 			}
 
 			if b := f.bref(); true {
-				b.Ops = append(b.Ops, ir.BranchIf{Cond: cond, Expr: condExpr, Block: thenState.block})
+				id := f.alloc(ir.BranchIf{
+					Cond:  cond,
+					Expr:  condExpr,
+					Block: thenState.block,
+				})
+
+				b.Code = append(b.Code, id)
+
+				id = f.alloc(ir.Branch{
+					Block: elseState.block,
+				})
+
+				b.Code = append(b.Code, id)
+
+				//	b.Ops = append(b.Ops, ir.BranchIf{Cond: cond, Expr: condExpr, Block: thenState.block})
 				//	b.Ops = append(b.Ops, ir.Branch{Block: elseState.block})
-				b.Next = elseState.block
+				//	b.Next = elseState.block
 			}
 
 			next := newState(f.f, thenState, elseState)
@@ -157,12 +169,22 @@ func (c *Front) compileBlock(ctx context.Context, f *state, b *ast.Block) (err e
 			tlog.Printw("branch", "base", f.block, "then", thenState.block, "else", elseState.block, "next", next.block)
 
 			if b := thenState.bref(); true {
+				id := f.alloc(ir.Branch{
+					Block: next.block,
+				})
+
+				b.Code = append(b.Code, id)
 				//	b.Ops = append(b.Ops, ir.Branch{Block: next.block})
-				b.Next = next.block
+				//	b.Next = next.block
 			}
 			if b := elseState.bref(); elseState != f {
+				id := f.alloc(ir.Branch{
+					Block: next.block,
+				})
+
+				b.Code = append(b.Code, id)
 				//	b.Ops = append(b.Ops, ir.Branch{Block: next.block})
-				b.Next = next.block
+				//	b.Next = next.block
 			}
 
 			f = next
@@ -191,12 +213,12 @@ func (c *Front) compileCond(ctx context.Context, s *state, e ast.Expr) (cc ir.Co
 		return "", -1, errors.New("unsupported expr: %T", e)
 	}
 
-	id, err = c.compileRExpr(ctx, s, e)
+	id, err = c.compileExpr(ctx, s, e)
 
 	return
 }
 
-func (c *Front) compileRExpr(ctx context.Context, s *state, e ast.Expr) (id ir.Expr, err error) {
+func (c *Front) compileExpr(ctx context.Context, s *state, e ast.Expr) (id ir.Expr, err error) {
 	switch e := e.(type) {
 	case ast.Ident:
 		id = s.findVar(string(e), nil)
@@ -213,12 +235,12 @@ func (c *Front) compileRExpr(ctx context.Context, s *state, e ast.Expr) (id ir.E
 
 		id = s.alloc(ir.Word(x))
 	case ast.BinOp:
-		l, err := c.compileRExpr(ctx, s, e.Left)
+		l, err := c.compileExpr(ctx, s, e.Left)
 		if err != nil {
 			return -1, errors.Wrap(err, "op lhs")
 		}
 
-		r, err := c.compileRExpr(ctx, s, e.Right)
+		r, err := c.compileExpr(ctx, s, e.Right)
 		if err != nil {
 			return -1, errors.Wrap(err, "op rhs")
 		}
@@ -252,7 +274,7 @@ func newState(f *ir.Func, par ...*state) *state {
 	}
 
 	s.block = len(f.Blocks)
-	f.Blocks = append(f.Blocks, ir.Block{Next: -1})
+	f.Blocks = append(f.Blocks, ir.Block{})
 
 	if len(par) == 0 {
 		s.cache = make(map[any]ir.Expr)

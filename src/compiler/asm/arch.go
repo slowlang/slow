@@ -1,4 +1,4 @@
-package obj
+package asm
 
 type (
 	Arch interface{}

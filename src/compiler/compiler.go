@@ -45,7 +45,7 @@ func Compile(ctx context.Context, name string, text []byte) (obj []byte, err err
 		}
 
 		for id, b := range f.Blocks {
-			tlog.Printw("block", "id", id, "in", b.In, "out", b.Out, "next", b.Next, "ops", b.Ops)
+			tlog.Printw("block", "block", id, "in", b.In, "out", b.Out, "code", b.Code)
 		}
 	}
 

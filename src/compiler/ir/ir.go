@@ -36,9 +36,7 @@ type (
 		In  []Expr
 		Out []Expr
 
-		Ops []any
-
-		Next int
+		Code []Expr
 	}
 
 	Package struct {
@@ -47,13 +45,13 @@ type (
 		Funcs []*Func
 	}
 
-	//	Branch struct {
-	//		Block int
-	//	}
+	Branch struct {
+		Block int
+	}
 
 	BranchIf struct {
-		Cond  Cond
 		Expr  Expr
+		Cond  Cond
 		Block int
 	}
 )
