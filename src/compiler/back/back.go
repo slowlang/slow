@@ -5,43 +5,40 @@ import (
 	"fmt"
 
 	"github.com/nikandfor/errors"
-	"github.com/nikandfor/loc"
 	"github.com/nikandfor/tlog"
 
-	"github.com/slowlang/slow/src/compiler/asm"
 	"github.com/slowlang/slow/src/compiler/ir"
 )
 
 type (
-	Arch interface {
-		Alloc(e ir.Expr) int
-		Free(reg int)
-	}
+	Arch interface{}
 
 	Compiler struct{}
 
-	state struct {
-		f *ir.Func
+	/*
+		state struct {
+			f *ir.Func
 
-		deps map[int][]int
+			deps map[int][]int
 
-		//	hint     map[ir.Expr]int
-		compiled map[int]struct{}
+			//	hint     map[ir.Expr]int
+			compiled map[int]struct{}
 
-		regnext int
-		reg     map[ir.Expr]int
+			regnext int
+			reg     map[ir.Expr]int
 
-		//
+			//
 
-		// codegen
-		code  [][]any // block -> code
-		ready map[ir.Expr]struct{}
+			// codegen
+			code  [][]any // block -> code
+			ready map[ir.Expr]struct{}
 
-		// color
-		nextcolor int
-		color     map[int]map[asm.Reg]int // block -> preg -> color
-		colreg    map[int]int             // color -> reg
-	}
+			// color
+			nextcolor int
+			color     map[int]map[asm.Reg]int // block -> preg -> color
+			colreg    map[int]int             // color -> reg
+		}
+	*/
 )
 
 func New() *Compiler { return nil }
@@ -73,6 +70,342 @@ _start:
 	return b, nil
 }
 
+func (c *Compiler) compileFunc(ctx context.Context, a Arch, b []byte, f *ir.Func) (_ []byte, err error) {
+	type block struct {
+	}
+
+	var blocks []*block
+	var curBlock int = -1
+
+	i2block := make([]int, len(f.Code))
+	labels := []int{}
+	jumps := map[int]int{} // i -> block
+
+	for i, e := range f.Code {
+		switch e := e.(type) {
+		case ir.Label:
+			curBlock = -1
+
+			for int(e) >= len(labels) {
+				labels = append(labels, -1)
+			}
+
+			labels[e] = len(blocks)
+		}
+
+		if curBlock == -1 {
+			curBlock = len(blocks)
+			blocks = append(blocks, &block{})
+		}
+
+		i2block[i] = curBlock
+
+		switch e.(type) {
+		case ir.B, ir.BCond:
+			curBlock = -1
+		}
+	}
+
+	blocksin := make([][]int, len(blocks)+1)
+
+	lastB := false
+
+	for i, e := range f.Code {
+		if i > 0 && !lastB && i2block[i-1] != i2block[i] {
+			blocksin[i2block[i]] = append(blocksin[i2block[i]], i2block[i-1])
+		}
+
+		var l ir.Label
+
+		lastB = false
+
+		switch e := e.(type) {
+		case ir.B:
+			l = e.Label
+
+			lastB = true
+		case ir.BCond:
+			l = e.Label
+		default:
+			continue
+		}
+
+		if l == -1 {
+			jumps[i] = len(blocks)
+		} else {
+			jumps[i] = labels[l]
+		}
+
+		blocksin[jumps[i]] = append(blocksin[jumps[i]], i2block[i])
+	}
+
+	phi := map[ir.Expr]ir.Expr{}
+	live := make([][]int, len(f.Code)) // expr -> reads
+
+	for i, e := range f.Code {
+		switch e := e.(type) {
+		case ir.Arg, ir.Word:
+		case ir.B, ir.Label:
+		case ir.BCond:
+			live[e.Expr] = append(live[e.Expr], i)
+		case ir.Add:
+			live[e.L] = append(live[e.L], i)
+			live[e.R] = append(live[e.R], i)
+		case ir.Cmp:
+			live[e.L] = append(live[e.L], i)
+			live[e.R] = append(live[e.R], i)
+		case ir.Phi:
+			for _, e := range e {
+				phi[e] = ir.Expr(i)
+			}
+		default:
+			panic(e)
+		}
+	}
+
+	for _, p := range f.Out {
+		live[p.Expr] = append(live[p.Expr], len(f.Code))
+	}
+
+	tlog.Printw("info", "i2block", i2block)
+	tlog.Printw("info", "blocks", blocks)
+	tlog.Printw("info", "labels", labels, "jumps", jumps, "b_in", blocksin)
+	tlog.Printw("info", "phi", phi)
+	tlog.Printw("info", "live", live)
+
+	regmap := make([]int, len(f.Code))
+
+	for i := range regmap {
+		regmap[i] = -1
+	}
+
+	freelist := []int{}
+	nextreg := len(f.In)
+
+	alloc := func(e ir.Expr) (r int) {
+		for s, ok := phi[e]; ok; s, ok = phi[e] {
+			e = s
+		}
+
+		if r = regmap[e]; r != -1 {
+			return r
+		}
+
+		if len(freelist) == 0 {
+			r = nextreg
+			nextreg++
+
+			regmap[e] = r
+
+			return r
+		}
+
+		l := len(freelist) - 1
+		r = freelist[l]
+		freelist = freelist[:l]
+
+		regmap[e] = r
+
+		return r
+	}
+
+	free := func(i int, e ir.Expr) {
+		for _, u := range live[e] {
+			if u > i {
+				return
+			}
+		}
+
+		reg := regmap[e]
+
+		freelist = append(freelist, reg)
+	}
+
+	getreg := func(e ir.Expr) (r int) {
+		for s, ok := phi[e]; ok; s, ok = phi[e] {
+			e = s
+		}
+
+		r = regmap[e]
+		if r == -1 {
+			panic(e)
+		}
+
+		return r
+	}
+
+	for i, p := range f.In {
+		regmap[p.Expr] = i
+	}
+
+	for id, e := range f.Code {
+		switch e := e.(type) {
+		case ir.Arg:
+		case ir.Word:
+			alloc(ir.Expr(id))
+		case ir.Add:
+			free(id, e.R)
+			free(id, e.L)
+
+			alloc(ir.Expr(id))
+		case ir.Cmp:
+			free(id, e.R)
+			free(id, e.L)
+
+			alloc(ir.Expr(id))
+		case ir.BCond:
+			free(id, e.Expr)
+		case ir.B, ir.Label, ir.Phi:
+		default:
+			panic(e)
+		}
+	}
+
+	tlog.Printw("reg map", "map", regmap)
+
+	b = fmt.Appendf(b, `.global %s
+.align 4
+%[1]s:
+	STP     FP, LR, [SP, #-16]!
+	MOV     FP, SP
+
+`, f.Name)
+
+	for id, e := range f.Code {
+		switch e := e.(type) {
+		case ir.Arg:
+			reg := getreg(ir.Expr(id))
+
+			b = fmt.Appendf(b, "	// Arg	X%d, %d	// expr %d\n", reg, e, id)
+		case ir.Word:
+			reg := getreg(ir.Expr(id))
+
+			b = fmt.Appendf(b, "	MOV	X%d, #%d	// expr %d\n", reg, e, id)
+		case ir.Add:
+			l := getreg(e.L)
+			r := getreg(e.R)
+			reg := getreg(ir.Expr(id))
+
+			b = fmt.Appendf(b, "	ADD	X%d, X%d, X%d	// expr %d\n", reg, l, r, id)
+		case ir.Cmp:
+			l := getreg(e.L)
+			r := getreg(e.R)
+			//	reg := getreg(ir.Expr(id))
+
+			b = fmt.Appendf(b, "	CMP	X%d, X%d	// expr %d\n", l, r, id)
+		case ir.BCond:
+			//x := getreg(e.Expr)
+
+			var cond string
+
+			switch e.Cond {
+			case "<":
+				cond = "LT"
+			case ">":
+				cond = "GT"
+			default:
+				panic(e.Cond)
+			}
+
+			b = fmt.Appendf(b, "	B.%s	block_%v\n", cond, labels[e.Label])
+		case ir.B:
+			if e.Label == -1 {
+				b = fmt.Appendf(b, "	B	ret_%s	// expr %d\n", f.Name, id)
+				break
+			}
+
+			b = fmt.Appendf(b, "	B	block_%v\n", labels[e.Label])
+		case ir.Label:
+			b = fmt.Appendf(b, "block_%v:\n", i2block[id])
+		case ir.Phi:
+			b = fmt.Appendf(b, "	// phi X%d = exprs %v	// expr %d\n", getreg(ir.Expr(id)), e, id)
+		default:
+			panic(e)
+		}
+	}
+
+	b = fmt.Appendf(b, `
+ret_%s:
+`, f.Name)
+
+	for i, p := range f.Out {
+		if i != regmap[p.Expr] {
+			b = fmt.Appendf(b, "	MOV	X%d, #%d	// result\n", i, regmap[p.Expr])
+		} else {
+			b = fmt.Appendf(b, "	// result[%d] = X%d\n", i, regmap[p.Expr])
+		}
+	}
+
+	b = fmt.Appendf(b, `
+	LDP     FP, LR, [SP], #16
+	RET
+`)
+
+	return b, nil
+}
+
+func (c *Compiler) compileFunc1(ctx context.Context, a Arch, b []byte, f *ir.Func) (_ []byte, err error) {
+	var q []ir.Expr
+	s := map[ir.Expr]struct{}{}
+
+	var calc func(id ir.Expr)
+
+	calc = func(id ir.Expr) {
+		if _, ok := s[id]; ok {
+			return
+		}
+
+		switch x := f.Code[id].(type) {
+		case ir.Phi:
+			for _, e := range x {
+				calc(e)
+			}
+		case ir.Add:
+			calc(x.L)
+			calc(x.R)
+		case ir.Cmp:
+			calc(x.L)
+			calc(x.R)
+		case ir.Arg:
+		case ir.Word:
+		case ir.B:
+		case ir.BCond:
+			calc(x.Expr)
+		default:
+			panic(x)
+		}
+
+		q = append(q, id)
+		s[id] = struct{}{}
+	}
+
+	for _, p := range f.Out {
+		calc(p.Expr)
+	}
+
+	tlog.Printw("calc queue", "queue", q)
+
+	return b, nil
+}
+
+func (c *Compiler) compileFunc0(ctx context.Context, a Arch, b []byte, f *ir.Func) (_ []byte, err error) {
+	b = fmt.Appendf(b, `.global %s
+.align 4
+%[1]s:
+	STP     FP, LR, [SP, #-16]!
+	MOV     FP, SP
+`, f.Name)
+
+	b = fmt.Appendf(b, `
+ret_%s:
+	LDP     FP, LR, [SP], #16
+	RET
+`, f.Name)
+
+	return b, nil
+}
+
+/*
 func (c *Compiler) compileFunc(ctx context.Context, a Arch, b []byte, f *ir.Func) (_ []byte, err error) {
 	s := &state{
 		f:    f,
@@ -860,16 +1193,6 @@ func (s *state) alloc(e ir.Expr) (reg int) {
 	return reg
 }
 
-func exprIn(e ir.Expr, in []ir.Expr) bool {
-	for _, x := range in {
-		if e == x {
-			return true
-		}
-	}
-
-	return false
-}
-
 func phi2regs(x ir.Phi) (r []asm.Reg) {
 	r = make([]asm.Reg, len(x))
 
@@ -878,4 +1201,15 @@ func phi2regs(x ir.Phi) (r []asm.Reg) {
 	}
 
 	return
+}
+*/
+
+func exprIn(e ir.Expr, in []ir.Expr) bool {
+	for _, x := range in {
+		if e == x {
+			return true
+		}
+	}
+
+	return false
 }

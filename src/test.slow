@@ -14,7 +14,7 @@ func main(argc int) (rc int) {
 
 	// --- a0, b0, c0 -> c1
 
-	if a > b {
+	if a < b {
 		c = c + a
 	} else {
 		c = c + b

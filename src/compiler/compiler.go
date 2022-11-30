@@ -40,12 +40,8 @@ func Compile(ctx context.Context, name string, text []byte) (obj []byte, err err
 	for _, f := range p.Funcs {
 		tlog.Printw("func", "name", f.Name, "in", f.In, "out", f.Out)
 
-		for id, e := range f.Exprs {
+		for id, e := range f.Code {
 			tlog.Printw("expr", "id", id, "type", tlog.FormatNext("%T"), e, "val", e)
-		}
-
-		for id, b := range f.Blocks {
-			tlog.Printw("block", "block", id, "in", b.In, "out", b.Out, "code", b.Code)
 		}
 	}
 

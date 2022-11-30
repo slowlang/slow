@@ -2,10 +2,10 @@ package front
 
 import (
 	"context"
+	"fmt"
 	"strconv"
 
 	"github.com/nikandfor/errors"
-	"github.com/nikandfor/tlog"
 
 	"github.com/slowlang/slow/src/compiler/ast"
 	"github.com/slowlang/slow/src/compiler/ir"
@@ -13,14 +13,13 @@ import (
 
 type (
 	state struct {
-		f     *ir.Func
-		block int
+		f *ir.Func
 
 		vars  map[string]ir.Expr
 		cache map[any]ir.Expr
+		label ir.Label
 
-		par  []*state
-		exit *state
+		par []*state
 	}
 )
 
@@ -46,6 +45,314 @@ func (c *Front) compileFunc(ctx context.Context, p *ir.Package, fn *ast.Func) (e
 		Out:  make([]ir.Param, len(fn.RetArgs)),
 	}
 
+	s := newState(f)
+
+	for i, p := range fn.Args {
+		a := ir.Arg(i)
+		id := ir.Expr(len(f.Code))
+
+		f.Code = append(f.Code, a)
+		f.In[i].Name = string(p.Name)
+		f.In[i].Expr = id
+
+		s.define(f.In[i].Name, id)
+	}
+
+	for i, p := range fn.RetArgs {
+		f.Out[i].Name = string(p.Name)
+
+		if f.Out[i].Name == "" {
+			f.Out[i].Name = fmt.Sprintf("ret_%d_%p", i, fn)
+		}
+	}
+
+	end, err := c.compileBlock(ctx, s, fn.Body)
+	if err != nil {
+		return errors.Wrap(err, "body")
+	}
+
+	for i, p := range f.Out {
+		id := end.findVar(p.Name)
+		if id == -1 {
+			id = end.alloc(ir.Word(0))
+		}
+
+		f.Out[i].Expr = id
+	}
+
+	p.Funcs = append(p.Funcs, f)
+
+	return nil
+}
+
+func (c *Front) compileBlock(ctx context.Context, s *state, b *ast.Block) (_ *state, err error) {
+	for _, x := range b.Stmts {
+		switch x := x.(type) {
+		case ast.Return:
+			id, err := c.compileExpr(ctx, s, x.Value)
+			if err != nil {
+				return nil, errors.Wrap(err, "return value")
+			}
+
+			s.define(s.f.Out[0].Name, id)
+
+			s.alloc(ir.B{
+				Label: -1,
+			})
+		case ast.Assignment:
+			id, err := c.compileExpr(ctx, s, x.Rhs)
+			if err != nil {
+				return nil, errors.Wrap(err, "assignment rhs")
+			}
+
+			v, ok := x.Lhs.(ast.Ident)
+			if !ok {
+				return nil, errors.New("unsupported lexpr: %T", x.Lhs)
+			}
+
+			s.define(string(v), id)
+		case *ast.IfStmt:
+			cond, condExpr, err := c.compileCond(ctx, s, x.Cond)
+			if err != nil {
+				return nil, errors.Wrap(err, "if cond")
+			}
+
+			cond = revCond(cond)
+
+			elseLabel := s.label
+			s.label++
+
+			s.alloc(ir.BCond{
+				Expr:  condExpr,
+				Cond:  cond,
+				Label: elseLabel,
+			})
+
+			then := newState(s.f, s)
+			then, err = c.compileBlock(ctx, then, x.Then)
+			if err != nil {
+				return nil, errors.Wrap(err, "then")
+			}
+
+			els := s
+
+			if x.Else != nil {
+				after := s.label
+				s.label++
+
+				s.alloc(ir.B{
+					Label: after,
+				})
+
+				s.alloc(elseLabel)
+
+				els = newState(s.f, s)
+				els, err = c.compileBlock(ctx, els, x.Else)
+				if err != nil {
+					return nil, errors.Wrap(err, "else")
+				}
+
+				s.alloc(after)
+			} else {
+				s.alloc(elseLabel)
+			}
+
+			next := newState(s.f, then, els)
+
+			s = next
+
+			/*
+			   	cmp
+			   	B.notcond else
+			   //then:
+			   	// ...
+			   	B after
+			   else:
+			   	// ...
+			   after:
+
+			   	cmp
+			   	B.notcond else
+			   //then:
+			   	// ...
+			   else:
+			*/
+		default:
+			return nil, errors.New("unsupported statement: %T", x)
+		}
+	}
+
+	return s, nil
+}
+
+func (c *Front) compileCond(ctx context.Context, s *state, e ast.Expr) (cc ir.Cond, id ir.Expr, err error) {
+	switch e := e.(type) {
+	case ast.BinOp:
+		switch e.Op {
+		case "<", ">":
+			cc = ir.Cond(e.Op)
+		default:
+			return "", -1, errors.New("unsupported op: %q", e.Op)
+		}
+	default:
+		return "", -1, errors.New("unsupported expr: %T", e)
+	}
+
+	id, err = c.compileExpr(ctx, s, e)
+
+	return
+}
+
+func (c *Front) compileExpr(ctx context.Context, s *state, e ast.Expr) (id ir.Expr, err error) {
+	switch e := e.(type) {
+	case ast.Ident:
+		id = s.findVar(string(e))
+		if id < 0 {
+			return id, errors.New("undefined var: %s", e)
+		}
+
+		return id, nil
+	case ast.Number:
+		x, err := strconv.ParseUint(string(e), 10, 64)
+		if err != nil {
+			return -1, errors.Wrap(err, "")
+		}
+
+		id = s.alloc(ir.Word(x))
+	case ast.BinOp:
+		l, err := c.compileExpr(ctx, s, e.Left)
+		if err != nil {
+			return -1, errors.Wrap(err, "op lhs")
+		}
+
+		r, err := c.compileExpr(ctx, s, e.Right)
+		if err != nil {
+			return -1, errors.Wrap(err, "op rhs")
+		}
+
+		switch e.Op {
+		case "+":
+			id = s.alloc(ir.Add{
+				L: l,
+				R: r,
+			})
+		case "<", ">":
+			id = s.alloc(ir.Cmp{
+				L: l,
+				R: r,
+			})
+		default:
+			return -1, errors.New("unsupported op: %q", e.Op)
+		}
+	default:
+		return -1, errors.New("unsupported expr: %T", e)
+	}
+
+	return
+}
+
+func newState(f *ir.Func, par ...*state) *state {
+	s := &state{
+		f:    f,
+		vars: make(map[string]ir.Expr),
+		par:  par,
+	}
+
+	if len(par) == 0 {
+		s.cache = map[any]ir.Expr{}
+		s.label = 0
+	} else {
+		s.cache = par[0].cache
+
+		for _, p := range par {
+			if p.label > s.label {
+				s.label = p.label
+			}
+		}
+	}
+
+	return s
+}
+
+func (s *state) findVar(n string) (id ir.Expr) {
+	id, ok := s.vars[n]
+	if ok {
+		return id
+	}
+
+	if len(s.par) == 0 {
+		return -1
+	}
+
+	var phi ir.Phi
+
+parents:
+	for _, p := range s.par {
+		id := p.findVar(n)
+		if id == -1 {
+			continue
+		}
+		for _, p := range phi {
+			if id == p {
+				continue parents
+			}
+		}
+
+		phi = append(phi, id)
+	}
+
+	if len(phi) == 0 {
+		return -1
+	}
+
+	if len(phi) == 1 {
+		return phi[0]
+	}
+
+	id = ir.Expr(len(s.f.Code))
+	s.f.Code = append(s.f.Code, phi)
+
+	s.vars[n] = id
+
+	return id
+}
+
+func (s *state) alloc(x any) (id ir.Expr) {
+	if id, ok := s.cache[x]; ok {
+		return id
+	}
+
+	id = ir.Expr(len(s.f.Code))
+	s.cache[x] = id
+
+	s.f.Code = append(s.f.Code, x)
+
+	return id
+}
+
+func (s *state) define(name string, id ir.Expr) {
+	s.vars[name] = id
+}
+
+func revCond(c ir.Cond) ir.Cond {
+	switch c {
+	case "<":
+		return ">"
+	case ">":
+		return "<"
+	default:
+		panic(string(c))
+	}
+}
+
+/*
+func (c *Front) compileFunc(ctx context.Context, p *ir.Package, fn *ast.Func) (err error) {
+	f := &ir.Func{
+		Name: fn.Name,
+		In:   make([]ir.Param, len(fn.Args)),
+		Out:  make([]ir.Param, len(fn.RetArgs)),
+	}
+
 	exit := newState(f)
 
 	s := newState(f)
@@ -53,9 +360,9 @@ func (c *Front) compileFunc(ctx context.Context, p *ir.Package, fn *ast.Func) (e
 
 	for i, p := range fn.Args {
 		e := ir.Arg(i)
-		id := ir.Expr(len(f.Exprs))
+		id := ir.Expr(len(f.Code))
 
-		f.Exprs = append(f.Exprs, e)
+		f.Code = append(f.Code, e)
 		f.In[i].Name = string(p.Name)
 		f.In[i].Expr = id
 
@@ -291,10 +598,10 @@ func (s *state) alloc(x any) (id ir.Expr) {
 		return id
 	}
 
-	id = ir.Expr(len(s.f.Exprs))
+	id = ir.Expr(len(s.f.Code))
 	s.cache[x] = id
 
-	s.f.Exprs = append(s.f.Exprs, x)
+	s.f.Code = append(s.f.Exprs, x)
 
 	return id
 }
@@ -340,8 +647,8 @@ parents:
 		return id
 	}
 
-	id = ir.Expr(len(s.f.Exprs))
-	s.f.Exprs = append(s.f.Exprs, phi)
+	id = ir.Expr(len(s.f.Code))
+	s.f.Code = append(s.f.Code, phi)
 
 	s.vars[n] = id
 
@@ -365,6 +672,7 @@ func (s *state) markVar(id ir.Expr, from *state) {
 func (s *state) bref() *ir.Block {
 	return &s.f.Blocks[s.block]
 }
+*/
 
 func exprIn(e ir.Expr, in []ir.Expr) bool {
 	for _, x := range in {

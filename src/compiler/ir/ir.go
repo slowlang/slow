@@ -1,9 +1,25 @@
 package ir
 
 type (
-	Word uint64
+	Package struct {
+		Path string
+
+		Funcs []*Func
+	}
+
+	Func struct {
+		Name string
+
+		In  []Param
+		Out []Param
+
+		Code []any
+	}
+
 	Expr int
-	Arg  int
+
+	Label int
+
 	Cond string
 
 	Param struct {
@@ -11,47 +27,27 @@ type (
 		Expr Expr
 	}
 
-	Phi []Expr
+	Arg int
+
+	Word uint64
 
 	Add struct {
-		Left  Expr
-		Right Expr
+		L, R Expr
 	}
 
 	Cmp struct {
-		Left  Expr
-		Right Expr
+		L, R Expr
 	}
 
-	Func struct {
-		Name string
-		In   []Param
-		Out  []Param
-
-		Exprs  []any
-		Blocks []Block
+	B struct {
+		Label Label
 	}
 
-	Block struct {
-		In  []Expr
-		Out []Expr
-
-		Code []Expr
-	}
-
-	Package struct {
-		Path string
-
-		Funcs []*Func
-	}
-
-	Branch struct {
-		Block int
-	}
-
-	BranchIf struct {
+	BCond struct {
 		Expr  Expr
 		Cond  Cond
-		Block int
+		Label Label
 	}
+
+	Phi []Expr
 )
