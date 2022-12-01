@@ -1,0 +1,15 @@
+
+func main(argc int) (rc int) {
+	a = argc
+	b = 3
+
+	c = a + b
+
+	i = 0
+	for i < 2 {
+		c = c + a
+		i = i + 1
+	}
+
+	return c
+}

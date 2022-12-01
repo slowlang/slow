@@ -4,8 +4,11 @@ import (
 	"context"
 	"fmt"
 	"strconv"
+	"unsafe"
 
 	"github.com/nikandfor/errors"
+	"github.com/nikandfor/loc"
+	"github.com/nikandfor/tlog"
 
 	"github.com/slowlang/slow/src/compiler/ast"
 	"github.com/slowlang/slow/src/compiler/ir"
@@ -16,10 +19,17 @@ type (
 		f *ir.Func
 
 		vars  map[string]ir.Expr
+		phi   []nameexpr
 		cache map[any]ir.Expr
 		label ir.Label
 
-		par []*state
+		exit *state
+		par  []*state
+	}
+
+	nameexpr struct {
+		name string
+		expr ir.Expr
 	}
 )
 
@@ -71,8 +81,11 @@ func (c *Front) compileFunc(ctx context.Context, p *ir.Package, fn *ast.Func) (e
 		return errors.Wrap(err, "body")
 	}
 
+	f.Code = append(f.Code, ir.Label(0))
+	s.exit.addParent(end)
+
 	for i, p := range f.Out {
-		id := end.findVar(p.Name)
+		id := s.exit.findVar(p.Name)
 		if id == -1 {
 			id = end.alloc(ir.Word(0))
 		}
@@ -81,6 +94,28 @@ func (c *Front) compileFunc(ctx context.Context, p *ir.Package, fn *ast.Func) (e
 	}
 
 	p.Funcs = append(p.Funcs, f)
+
+	var pr func(s *state)
+	done := map[*state]struct{}{}
+
+	pr = func(s *state) {
+		if _, ok := done[s]; ok {
+			return
+		}
+
+		done[s] = struct{}{}
+
+		par := make([]uintptr, len(s.par))
+
+		for i, p := range s.par {
+			pr(p)
+			par[i] = uintptr(unsafe.Pointer(p))
+		}
+
+		tlog.Printw("block", "ptr", uintptr(unsafe.Pointer(s)), "vars", s.vars, "par", par)
+	}
+
+	pr(s.exit)
 
 	return nil
 }
@@ -97,8 +132,10 @@ func (c *Front) compileBlock(ctx context.Context, s *state, b *ast.Block) (_ *st
 			s.define(s.f.Out[0].Name, id)
 
 			s.alloc(ir.B{
-				Label: -1,
+				Label: 0,
 			})
+
+			s.exit.par = append(s.exit.par, s)
 		case ast.Assignment:
 			id, err := c.compileExpr(ctx, s, x.Rhs)
 			if err != nil {
@@ -177,6 +214,46 @@ func (c *Front) compileBlock(ctx context.Context, s *state, b *ast.Block) (_ *st
 			   	// ...
 			   else:
 			*/
+		case *ast.ForStmt:
+			loopCond := newState(s.f, s)
+
+			loopStart := s.label
+			s.label++
+
+			s.alloc(loopStart)
+
+			cond, condExpr, err := c.compileCond(ctx, loopCond, x.Cond)
+			if err != nil {
+				return nil, errors.Wrap(err, "for cond")
+			}
+
+			cond = revCond(cond)
+
+			loopEnd := s.label
+			s.label++
+
+			s.alloc(ir.BCond{
+				Expr:  condExpr,
+				Cond:  cond,
+				Label: loopEnd,
+			})
+
+			loopBody := newState(s.f, loopCond)
+
+			loopBody, err = c.compileBlock(ctx, loopBody, x.Body)
+			if err != nil {
+				return nil, errors.Wrap(err, "loop body")
+			}
+
+			s.alloc(ir.B{
+				Label: loopStart,
+			})
+
+			s.alloc(loopEnd)
+
+			loopCond.addParent(loopBody)
+
+			s = loopBody
 		default:
 			return nil, errors.New("unsupported statement: %T", x)
 		}
@@ -258,11 +335,18 @@ func newState(f *ir.Func, par ...*state) *state {
 		par:  par,
 	}
 
+	tlog.Printw("new block", "par", len(par), "from", loc.Caller(1))
+
 	if len(par) == 0 {
 		s.cache = map[any]ir.Expr{}
-		s.label = 0
+		s.exit = &state{
+			f:    f,
+			vars: make(map[string]ir.Expr),
+		}
+		s.label = 1
 	} else {
 		s.cache = par[0].cache
+		s.exit = par[0].exit
 
 		for _, p := range par {
 			if p.label > s.label {
@@ -305,14 +389,18 @@ parents:
 		return -1
 	}
 
-	if len(phi) == 1 {
-		return phi[0]
-	}
+	//	if len(phi) == 1 {
+	//		return phi[0]
+	//	}
 
 	id = ir.Expr(len(s.f.Code))
 	s.f.Code = append(s.f.Code, phi)
 
 	s.vars[n] = id
+	s.phi = append(s.phi, nameexpr{
+		name: n,
+		expr: id,
+	})
 
 	return id
 }
@@ -332,6 +420,33 @@ func (s *state) alloc(x any) (id ir.Expr) {
 
 func (s *state) define(name string, id ir.Expr) {
 	s.vars[name] = id
+}
+
+func (s *state) addParent(par *state) {
+	tlog.Printw("add parent", "s.vars", s.vars, "par.vars", par.vars)
+
+vars:
+	for _, phi := range s.phi {
+		p := s.f.Code[phi.expr].(ir.Phi)
+
+		x := par.findVar(phi.name)
+
+		tlog.Printw("fix phi", "var", phi.name, "phi", p, "newid", x)
+
+		if x == phi.expr {
+			continue
+		}
+
+		for _, p := range p {
+			if p == x {
+				continue vars
+			}
+		}
+
+		s.f.Code[phi.expr] = append(p, x)
+	}
+
+	s.par = append(s.par, par)
 }
 
 func revCond(c ir.Cond) ir.Cond {

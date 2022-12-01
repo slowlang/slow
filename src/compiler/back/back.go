@@ -72,6 +72,135 @@ _start:
 
 func (c *Compiler) compileFunc(ctx context.Context, a Arch, b []byte, f *ir.Func) (_ []byte, err error) {
 	type block struct {
+		In  []ir.Expr
+		Out []ir.Expr
+
+		Above []int
+		Below []int
+	}
+
+	var blocks []*block
+	var labels []int
+	i2b := make([]int, len(f.Code))
+
+	{
+		b := -1
+
+		for i, e := range f.Code {
+			if e, ok := e.(ir.Label); ok {
+				b = -1
+
+				for int(e) >= len(labels) {
+					labels = append(labels, -1)
+				}
+
+				labels[e] = len(blocks)
+			}
+
+			if b == -1 {
+				b = len(blocks)
+
+				blocks = append(blocks, &block{})
+			}
+
+			i2b[i] = b
+
+			switch e.(type) {
+			case ir.B, ir.BCond:
+				b = -1
+			}
+		}
+
+		//	blocks = append(blocks, &block{}) // exit block
+	}
+
+	appendLink := func(l []ir.Expr, e ir.Expr) []ir.Expr {
+		for _, x := range l {
+			if x == e {
+				return l
+			}
+		}
+
+		return append(l, e)
+	}
+
+	appendBlock := func(l []int, e int) []int {
+		for _, x := range l {
+			if x == e {
+				return l
+			}
+		}
+
+		return append(l, e)
+	}
+
+	linkBlocks := func(b1, b2 int, e ir.Expr) {
+		if b1 != -1 {
+			blocks[b1].Out = appendLink(blocks[b1].Out, e)
+			blocks[b1].Below = appendBlock(blocks[b1].Below, b2)
+		}
+
+		if b2 != -1 {
+			blocks[b2].In = appendLink(blocks[b2].In, e)
+			blocks[b2].Above = appendBlock(blocks[b2].Above, b1)
+		}
+	}
+
+	for i, e := range f.Code {
+		b := i2b[i]
+
+		switch e := e.(type) {
+		case ir.Arg:
+			linkBlocks(-1, b, ir.Expr(i))
+		case ir.Word:
+		case ir.Add:
+			if db := i2b[e.L]; db != b {
+				linkBlocks(db, b, e.L)
+			}
+			if db := i2b[e.R]; db != b {
+				linkBlocks(db, b, e.R)
+			}
+		case ir.Cmp:
+			if db := i2b[e.L]; db != b {
+				linkBlocks(db, b, e.L)
+			}
+			if db := i2b[e.R]; db != b {
+				linkBlocks(db, b, e.R)
+			}
+		case ir.BCond:
+			if db := i2b[e.Expr]; db != b {
+				linkBlocks(db, b, e.Expr)
+			}
+		case ir.Phi:
+			for _, p := range e {
+				linkBlocks(i2b[p], b, p)
+			}
+		case ir.B, ir.Label:
+		default:
+			panic(e)
+		}
+	}
+
+	for _, p := range f.Out {
+		linkBlocks(i2b[p.Expr], -1, p.Expr)
+	}
+
+	tlog.Printw("labels", "labels", labels)
+	tlog.Printw("func", "name", f.Name, "in", f.In, "out", f.Out)
+
+	for j, b := range blocks {
+		tlog.Printw("block", "block", j, "in", b.In, "out", b.Out, "above", b.Above, "below", b.Below)
+	}
+
+	for i, e := range f.Code {
+		tlog.Printw("expr", "id", i, "block", i2b[i], "type", tlog.FormatNext("%T"), e, "val", e)
+	}
+
+	return b, nil
+}
+
+func (c *Compiler) compileFunc2(ctx context.Context, a Arch, b []byte, f *ir.Func) (_ []byte, err error) {
+	type block struct {
 	}
 
 	var blocks []*block
@@ -139,8 +268,20 @@ func (c *Compiler) compileFunc(ctx context.Context, a Arch, b []byte, f *ir.Func
 		blocksin[jumps[i]] = append(blocksin[jumps[i]], i2block[i])
 	}
 
-	phi := map[ir.Expr]ir.Expr{}
+	phi := map[ir.Expr][]ir.Expr{}
+	//	phi := [][2]ir.Expr{}
 	live := make([][]int, len(f.Code)) // expr -> reads
+
+	rephi := func(e ir.Expr) ir.Expr {
+		for {
+			ee := phi[e]
+			if len(ee) == 0 {
+				return e
+			}
+
+			e = ee[len(ee)-1]
+		}
+	}
 
 	for i, e := range f.Code {
 		switch e := e.(type) {
@@ -156,7 +297,8 @@ func (c *Compiler) compileFunc(ctx context.Context, a Arch, b []byte, f *ir.Func
 			live[e.R] = append(live[e.R], i)
 		case ir.Phi:
 			for _, e := range e {
-				phi[e] = ir.Expr(i)
+				phi[e] = append(phi[e], ir.Expr(i))
+				live[e] = append(live[e], i)
 			}
 		default:
 			panic(e)
@@ -173,6 +315,12 @@ func (c *Compiler) compileFunc(ctx context.Context, a Arch, b []byte, f *ir.Func
 	tlog.Printw("info", "phi", phi)
 	tlog.Printw("info", "live", live)
 
+	tlog.Printw("func", "name", f.Name, "in", f.In, "out", f.Out)
+
+	for id, e := range f.Code {
+		tlog.Printw("expr", "id", id, "block", i2block[id], "type", tlog.FormatNext("%T"), e, "val", e)
+	}
+
 	regmap := make([]int, len(f.Code))
 
 	for i := range regmap {
@@ -180,22 +328,31 @@ func (c *Compiler) compileFunc(ctx context.Context, a Arch, b []byte, f *ir.Func
 	}
 
 	freelist := []int{}
-	nextreg := len(f.In)
+	nextreg := 0
 
 	alloc := func(e ir.Expr) (r int) {
-		for s, ok := phi[e]; ok; s, ok = phi[e] {
-			e = s
-		}
+		ee := rephi(e)
+		//	for s, ok := phi[e]; ok; s, ok = phi[e] {
+		//		e = s
+		//	}
 
-		if r = regmap[e]; r != -1 {
+		if r = regmap[ee]; r != -1 {
 			return r
 		}
+
+		defer func() {
+			tlog.Printw("alloc", "id", e, "e", e, "ee", ee, "reg", r, "freelist", freelist)
+		}()
 
 		if len(freelist) == 0 {
 			r = nextreg
 			nextreg++
 
-			regmap[e] = r
+			for _, e := range phi[e] {
+				regmap[e] = r
+			}
+
+			regmap[ee] = r
 
 			return r
 		}
@@ -204,7 +361,11 @@ func (c *Compiler) compileFunc(ctx context.Context, a Arch, b []byte, f *ir.Func
 		r = freelist[l]
 		freelist = freelist[:l]
 
-		regmap[e] = r
+		for _, e := range phi[e] {
+			regmap[e] = r
+		}
+
+		regmap[ee] = r
 
 		return r
 	}
@@ -218,24 +379,27 @@ func (c *Compiler) compileFunc(ctx context.Context, a Arch, b []byte, f *ir.Func
 
 		reg := regmap[e]
 
+		tlog.Printw("free", "id", i, "e", e, "ee", e, "reg", reg, "freelist", freelist)
+
 		freelist = append(freelist, reg)
 	}
 
 	getreg := func(e ir.Expr) (r int) {
-		for s, ok := phi[e]; ok; s, ok = phi[e] {
-			e = s
-		}
+		ee := rephi(e)
+		//	for s, ok := phi[e]; ok; s, ok = phi[e] {
+		//		e = s
+		//	}
 
-		r = regmap[e]
+		r = regmap[ee]
 		if r == -1 {
-			panic(e)
+			panic(fmt.Sprintf("no reg for %d -> %d", e, ee))
 		}
 
 		return r
 	}
 
-	for i, p := range f.In {
-		regmap[p.Expr] = i
+	for _, p := range f.In {
+		regmap[p.Expr] = alloc(p.Expr)
 	}
 
 	for id, e := range f.Code {
@@ -255,7 +419,8 @@ func (c *Compiler) compileFunc(ctx context.Context, a Arch, b []byte, f *ir.Func
 			alloc(ir.Expr(id))
 		case ir.BCond:
 			free(id, e.Expr)
-		case ir.B, ir.Label, ir.Phi:
+		case ir.B, ir.Label:
+		case ir.Phi:
 		default:
 			panic(e)
 		}
