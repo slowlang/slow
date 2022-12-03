@@ -25,7 +25,7 @@ func main() {
 		Description: "slow is a tool for managining slow source code",
 		Before:      before,
 		Flags: []*cli.Flag{
-			cli.NewFlag("log", "stderr+dm", "log destination"),
+			cli.NewFlag("log", "stderr:dm", "log destination"),
 			cli.NewFlag("v", "", "log verbosity"),
 			cli.NewFlag("debug", "", "debug http address"),
 
@@ -58,7 +58,7 @@ func before(c *cli.Command) (err error) {
 
 	tlog.DefaultLogger = tlog.New(w)
 
-	tlog.SetFilter(c.String("v"))
+	tlog.SetVerbosity(c.String("v"))
 
 	if w, ok := w.(tlio.TeeWriter); ok {
 		for _, w := range w {

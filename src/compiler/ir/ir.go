@@ -13,12 +13,18 @@ type (
 		In  []Param
 		Out []Param
 
-		Code []any
+		Exprs  []any
+		Blocks []Block
+	}
+
+	Block struct {
+		Phi  []Expr
+		Code []Expr
+
+		Next int
 	}
 
 	Expr int
-
-	Label int
 
 	Cond string
 
@@ -39,14 +45,14 @@ type (
 		L, R Expr
 	}
 
-	B struct {
-		Label Label
-	}
+	//	B struct {
+	//		Block int
+	//	}
 
 	BCond struct {
 		Expr  Expr
 		Cond  Cond
-		Label Label
+		Block int
 	}
 
 	Phi []Expr

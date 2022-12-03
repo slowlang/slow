@@ -71,6 +71,69 @@ _start:
 }
 
 func (c *Compiler) compileFunc(ctx context.Context, a Arch, b []byte, f *ir.Func) (_ []byte, err error) {
+	tlog.Printw("func", "name", f.Name, "in", f.In, "out", f.Out)
+
+	for block := range f.Blocks {
+		b := f.Blocks[block]
+
+		for _, p := range b.Phi {
+			tlog.Printw("block", "id", "__", "block", block, "next", b.Next, "phi", p, "exprs", f.Exprs[p])
+		}
+	}
+
+	for _, p := range f.In {
+		e := f.Exprs[p.Expr]
+		tlog.Printw("arg", "id", p.Expr, "block", "_", "type", tlog.FormatNext("%T"), e, "val", e)
+	}
+
+	printBlock := func(block int) {
+		b := f.Blocks[block]
+
+		for _, id := range b.Phi {
+			e := f.Exprs[id]
+			tlog.Printw("phi", "id", id, "block", block, "type", tlog.FormatNext("%T"), e, "val", e)
+		}
+
+		for _, id := range b.Code {
+			e := f.Exprs[id]
+			tlog.Printw("expr", "id", id, "block", block, "type", tlog.FormatNext("%T"), e, "val", e)
+		}
+
+		next := func() interface{} {
+			if b.Next >= 0 {
+				return b.Next
+			}
+
+			return "_"
+		}
+
+		tlog.Printw("next", "id", "__", "block", block, "next", next())
+	}
+
+	for block := 1; block < len(f.Blocks); block++ {
+		printBlock(block)
+	}
+
+	printBlock(0)
+
+	regmap := map[ir.Expr]int{}
+
+	for i, p := range f.In {
+		regmap[p.Expr] = i
+	}
+
+	allocBlock := func(block int) {
+	}
+
+	allocBlock(0)
+
+	tlog.Printw("regmap", "map", regmap)
+
+	return b, nil
+}
+
+/*
+func (c *Compiler) compileFunc3(ctx context.Context, a Arch, b []byte, f *ir.Func) (_ []byte, err error) {
 	type block struct {
 		In  []ir.Expr
 		Out []ir.Expr
@@ -570,7 +633,6 @@ ret_%s:
 	return b, nil
 }
 
-/*
 func (c *Compiler) compileFunc(ctx context.Context, a Arch, b []byte, f *ir.Func) (_ []byte, err error) {
 	s := &state{
 		f:    f,
