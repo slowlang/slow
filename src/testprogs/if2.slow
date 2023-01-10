@@ -7,6 +7,8 @@ func main(argc int) (rc int) {
 
 	if a < b {
 		c = c + a
+	} else {
+		c = c + b
 	}
 
 	return c

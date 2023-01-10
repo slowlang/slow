@@ -11,7 +11,14 @@ import (
 )
 
 type (
-	Arch interface{}
+	Arch interface {
+		Alloc(id ir.Expr) int
+		Free(int)
+	}
+
+	arch struct {
+		freelist []int
+	}
 
 	Compiler struct{}
 
@@ -52,7 +59,7 @@ _start:
 	STP     FP, LR, [SP, #-16]!
 	MOV     FP, SP
 
-	BL	main
+	BL	_main
 
 	LDP     FP, LR, [SP], #16
 	RET
@@ -71,6 +78,294 @@ _start:
 }
 
 func (c *Compiler) compileFunc(ctx context.Context, a Arch, b []byte, f *ir.Func) (_ []byte, err error) {
+	var q []int
+
+	add := func(block int) {
+		for _, x := range q {
+			if x == block {
+				return
+			}
+		}
+
+		q = append(q, block)
+	}
+
+	allBlocks := func(fn func(block int, b *ir.Block)) {
+		q = q[:0]
+		add(f.Entry)
+
+		for i := 0; i < len(q); i++ {
+			block := q[i]
+			bp := &f.Blocks[block]
+
+			for _, id := range bp.Code {
+				x := f.Exprs[id]
+
+				switch x := x.(type) {
+				case ir.B:
+					add(x.Block)
+				case ir.BCond:
+					add(x.Block)
+				}
+			}
+
+			fn(block, bp)
+		}
+	}
+
+	life := map[ir.Expr][]ir.Expr{}
+
+	{ // lifetime
+		i2b := map[ir.Expr]int{}
+		buse := map[int][]ir.Expr{}
+		bin := map[int][]int{}
+		phi := map[ir.Expr]ir.Phi{}
+		phib := map[ir.Expr]int{}
+
+		for _, p := range f.In {
+			i2b[p.Expr] = f.Entry
+		}
+
+		for _, p := range f.Out {
+			life[p.Expr] = []ir.Expr{-1}
+		}
+
+		for block := range f.Blocks {
+			b := &f.Blocks[block]
+
+			for _, id := range b.Phi {
+				x := f.Exprs[id].(ir.Phi)
+				phi[id] = x
+				phib[id] = block
+
+				for _, x := range x {
+					buse[block] = append(buse[block], x)
+				}
+
+				i2b[id] = block
+
+				tlog.Printw("phi", "id", id, "val", x)
+			}
+
+			for _, id := range b.Code {
+				i2b[id] = block
+			}
+		}
+
+		br := func(id ir.Expr, from, to int) {
+			for _, escape := range buse[to] {
+				if i2b[escape] != from {
+					continue
+				}
+
+				life[escape] = append(life[escape], id)
+			}
+
+			bin[to] = append(bin[to], from)
+		}
+
+		allBlocks(func(block int, bp *ir.Block) {
+			for _, id := range bp.Code {
+				x := f.Exprs[id]
+
+				// TODO
+
+				switch x := x.(type) {
+				case ir.Add:
+					life[x.L] = append(life[x.L], id)
+					life[x.R] = append(life[x.R], id)
+				case ir.Cmp:
+					life[x.L] = append(life[x.L], id)
+					life[x.R] = append(life[x.R], id)
+				case ir.B:
+					br(id, block, x.Block)
+				case ir.BCond:
+					life[x.Expr] = append(life[x.Expr], id)
+
+					br(id, block, x.Block)
+				}
+			}
+		})
+
+		tlog.Printw("i2b", "i2b", i2b)
+		tlog.Printw("phi", "phi", phi)
+		tlog.Printw("bin", "bin", bin)
+		tlog.Printw("buse", "buse", buse)
+
+		for id, l := range life {
+			tlog.Printw("life", "id", id, "uses", l)
+		}
+	}
+
+	{ // print
+		tlog.Printw("func", "name", f.Name, "entry", f.Entry, "in", len(f.In), "out", len(f.Out))
+
+		for _, p := range f.In {
+			x := f.Exprs[p.Expr]
+
+			tlog.Printw("arg", "block", tlog.None, "id", p.Expr, "type", tlog.FormatNext("%T"), x, "val", x)
+		}
+
+		for _, p := range f.Out {
+			x := f.Exprs[p.Expr]
+
+			tlog.Printw("res", "block", tlog.None, "id", p.Expr, "type", tlog.FormatNext("%T"), x, "val", x)
+		}
+
+		allBlocks(func(block int, bp *ir.Block) {
+			//	tlog.Printw("block", "block", block, "loop", b.Loop)
+
+			for _, id := range bp.Phi {
+				x := f.Exprs[id]
+
+				tlog.Printw("phi", "block", block, "id", id, "type", tlog.FormatNext("%T"), x, "val", x, "life", life[id])
+			}
+
+			for _, id := range bp.Code {
+				x := f.Exprs[id]
+
+				args := []any{"block", block, "id", id, "type", tlog.FormatNext("%T"), x, "val", x}
+				if len(life[id]) != 0 {
+					args = append(args, "life", life[id])
+				}
+
+				tlog.Printw("code", args...)
+			}
+		})
+	}
+
+	regmap := map[ir.Expr]int{}
+
+	{ // alloc
+		isLastUse := func(block int, id, x ir.Expr) bool {
+			l := life[x]
+
+			return l[len(l)-1] == id
+		}
+
+		for i, p := range f.In {
+			regmap[p.Expr] = i
+		}
+
+		allBlocks(func(block int, bp *ir.Block) {
+			tlog.Printw("alloc block", "block", block, "regmap", regmap)
+
+			a := newAArch64()
+
+		outphi:
+			for _, id := range bp.Phi {
+				x := f.Exprs[id].(ir.Phi)
+
+				for _, x := range x {
+					if reg, ok := regmap[x]; ok {
+						regmap[id] = reg
+						a.Use(id, reg)
+						continue outphi
+					}
+				}
+
+				panic(id)
+			}
+
+			for _, id := range bp.Code {
+				x := f.Exprs[id]
+
+				switch x := x.(type) {
+				case ir.Imm:
+					reg := a.Alloc(id)
+					regmap[id] = reg
+				case ir.Add:
+					if isLastUse(block, id, x.R) {
+						a.Free(regmap[x.R])
+					}
+					if isLastUse(block, id, x.L) {
+						a.Free(regmap[x.L])
+					}
+
+					reg := a.Alloc(id)
+					regmap[id] = reg
+				case ir.Cmp:
+					if isLastUse(block, id, x.R) {
+						a.Free(regmap[x.R])
+					}
+					if isLastUse(block, id, x.L) {
+						a.Free(regmap[x.L])
+					}
+				case ir.B:
+				case ir.BCond:
+				default:
+					panic(x)
+				}
+			}
+		})
+	}
+
+	reg := func(id ir.Expr) int {
+		r, ok := regmap[id]
+		if !ok {
+			panic(id)
+		}
+
+		return r
+	}
+
+	{ // compile
+
+		b = fmt.Appendf(b, `
+.global _%v
+.align 4
+_%[1]v:
+	STP     FP, LR, [SP, #-16]!
+	MOV     FP, SP
+
+`, f.Name)
+
+		for i, p := range f.In {
+			b = fmt.Appendf(b, "	// arg %d expr %d\n", i, p.Expr)
+		}
+
+		allBlocks(func(block int, bp *ir.Block) {
+			b = fmt.Appendf(b, "block_%v:\n", block)
+
+			for _, id := range bp.Code {
+				x := f.Exprs[id]
+
+				switch x := x.(type) {
+				case ir.Imm:
+					b = fmt.Appendf(b, "	MOV	X%d, #%d	// expr %d\n", reg(id), x, id)
+				case ir.Add:
+					b = fmt.Appendf(b, "	ADD	X%d, X%d, X%d	// expr %d\n", reg(id), reg(x.L), reg(x.R), id)
+				case ir.Cmp:
+					b = fmt.Appendf(b, "	CMP	X%d, X%d	// expr %d\n", reg(x.L), reg(x.R), id)
+				case ir.B:
+					b = fmt.Appendf(b, "	B	block_%v\n", x.Block)
+				case ir.BCond:
+					b = fmt.Appendf(b, "	B.%v	block_%v\n", cond2asm(x.Cond), x.Block)
+				default:
+					panic(x)
+				}
+			}
+		})
+
+		for i, p := range f.Out {
+			if regmap[p.Expr] != i {
+				b = fmt.Appendf(b, "	MOV	X%d, X%d	// res %d  expr %d\n", i, regmap[p.Expr], i, p.Expr)
+			} else {
+				b = fmt.Appendf(b, "	// res %d  expr %d\n", i, p.Expr)
+			}
+		}
+
+		b = fmt.Appendf(b, `
+	LDP     FP, LR, [SP], #16
+	RET
+`)
+	}
+
+	return b, nil
+}
+
+/*
+func (c *Compiler) compileFunc4(ctx context.Context, a Arch, b []byte, f *ir.Func) (_ []byte, err error) {
 	i2b := make([]int, len(f.Exprs))
 
 	for i := range i2b {
@@ -159,13 +454,13 @@ func (c *Compiler) compileFunc(ctx context.Context, a Arch, b []byte, f *ir.Func
 			e := f.Exprs[id]
 
 			switch e.(type) {
-			case ir.Arg, ir.Word,
+			case ir.Arg, ir.Imm,
 				ir.Add, ir.Cmp:
 				bb.use[id] = &life{W: i, R: -1}
 			}
 
 			switch e := e.(type) {
-			case ir.Arg, ir.Word:
+			case ir.Arg, ir.Imm:
 			case ir.B:
 			case ir.BCond:
 				bb.use[e.Expr].R = i
@@ -329,7 +624,6 @@ func (c *Compiler) compileFunc(ctx context.Context, a Arch, b []byte, f *ir.Func
 	return b, nil
 }
 
-/*
 func (c *Compiler) compileFunc3(ctx context.Context, a Arch, b []byte, f *ir.Func) (_ []byte, err error) {
 	type block struct {
 		In  []ir.Expr
@@ -1636,4 +1930,60 @@ func exprIn(e ir.Expr, in []ir.Expr) bool {
 	}
 
 	return false
+}
+
+func cond2asm(cond ir.Cond) string {
+	switch cond {
+	case "<":
+		return "LT"
+	default:
+		panic(cond)
+	}
+}
+
+func newAArch64() *arch {
+	a := &arch{
+		freelist: make([]int, 16),
+	}
+
+	for i := range a.freelist {
+		a.freelist[i] = len(a.freelist) - 1 - i
+	}
+
+	return a
+}
+
+func (a *arch) Alloc(id ir.Expr) int {
+	l := len(a.freelist)
+
+	if l == 0 {
+		panic("no more")
+	}
+
+	reg := a.freelist[l-1]
+
+	a.freelist = a.freelist[:l-1]
+
+	tlog.Printw("alloc", "id", id, "reg", reg)
+
+	return reg
+}
+
+func (a *arch) Free(reg int) {
+	tlog.Printw("alloc", "id", tlog.None, "reg", reg)
+	a.freelist = append(a.freelist, reg)
+}
+
+func (a *arch) Use(id ir.Expr, reg int) {
+	for i, x := range a.freelist {
+		if x == reg {
+			tlog.Printw("use", "id", id, "reg", reg)
+			l := len(a.freelist)
+			copy(a.freelist[i:], a.freelist[i+1:])
+			a.freelist = a.freelist[:l-1]
+			return
+		}
+	}
+
+	panic(reg)
 }

@@ -1,15 +1,15 @@
 
 
-run_%: %.out
+run_%: testprogs/%.out
 	./$<
 
-.PRECIOUS: %.out
-%.out: %.o
+.PRECIOUS: testprogs/%.out
+testprogs/%.out: testprogs/%.o
 	ld -arch arm64 -o $@ $^ -e _start -lSystem -syslibroot `xcrun -sdk macosx --show-sdk-path`
 
-%.o: %.s
+testprogs/%.o: testprogs/%.s
 	as -arch arm64 -o $@ $^ -g
 
 .PRECIOUS: %.s
-%.s: %.slow Makefile $(wildcard ./cmd/slow/*.go) $(wildcard ./compiler/*.go) $(wildcard ./compiler/*/*.go)
-	go run ./cmd/slow compile $< >$@
+testprogs/%.s: testprogs/%.slow Makefile $(wildcard ./cmd/slow/*.go) $(wildcard ./compiler/*.go) $(wildcard ./compiler/*/*.go)
+	go run ./cmd/slow compile $< | tee $@

@@ -51,17 +51,25 @@ func (c *Front) compileFunc(ctx context.Context, p *ir.Package, fn *ast.Func) (e
 
 	s := newState(f)
 
+	f.Entry = s.block
+
 	for i, p := range fn.Args {
 		a := ir.Arg(i)
-		id := ir.Expr(len(f.Exprs))
 
+		id := ir.Expr(len(f.Exprs))
 		f.Exprs = append(f.Exprs, a)
+
+		phi := ir.Phi{id}
+
+		id2 := ir.Expr(len(f.Exprs))
+		f.Exprs = append(f.Exprs, phi)
+
 		f.In[i].Name = string(p.Name)
 		f.In[i].Expr = id
 
-		f.Blocks[s.block].Code = append(f.Blocks[s.block].Code, id)
+		f.Blocks[s.block].Phi = append(f.Blocks[s.block].Phi, id2)
 
-		s.define(f.In[i].Name, id)
+		s.define(f.In[i].Name, id2)
 	}
 
 	for i, p := range fn.RetArgs {
@@ -82,7 +90,7 @@ func (c *Front) compileFunc(ctx context.Context, p *ir.Package, fn *ast.Func) (e
 	for i, p := range f.Out {
 		id := s.exit.findVar(p.Name)
 		if id == -1 {
-			id = end.alloc(ir.Word(0))
+			id = end.alloc(ir.Imm(0))
 		}
 
 		f.Out[i].Expr = id
@@ -152,18 +160,14 @@ func (c *Front) compileBlock(ctx context.Context, s *state, b *ast.Block) (_ *st
 				return nil, errors.Wrap(err, "if cond")
 			}
 
-			cond = revCond(cond)
-
-			//	elseLabel := s.label
-			//	s.label++
+			then := newState(s.f, s)
 
 			s.alloc(ir.BCond{
-				Expr: condExpr,
-				Cond: cond,
-				//		Label: elseLabel,
+				Expr:  condExpr,
+				Cond:  cond,
+				Block: then.block,
 			})
 
-			then := newState(s.f, s)
 			then, err = c.compileBlock(ctx, then, x.Then)
 			if err != nil {
 				return nil, errors.Wrap(err, "then")
@@ -172,48 +176,53 @@ func (c *Front) compileBlock(ctx context.Context, s *state, b *ast.Block) (_ *st
 			els := s
 
 			if x.Else != nil {
-				//	after := s.label
-				//	s.label++
-
-				//	s.alloc(ir.B{
-				//		Label: after,
-				//	})
-
-				//	s.alloc(elseLabel)
-
 				els = newState(s.f, s)
+
+				s.alloc(ir.B{
+					Block: els.block,
+				})
+
 				els, err = c.compileBlock(ctx, els, x.Else)
 				if err != nil {
 					return nil, errors.Wrap(err, "else")
 				}
-
-				//	s.alloc(after)
-			} else {
-				//	s.alloc(elseLabel)
 			}
 
 			next := newState(s.f, then, els)
 
+			then.alloc(ir.B{
+				Block: next.block,
+			})
+
+			els.alloc(ir.B{
+				Block: next.block,
+			})
+
 			s = next
 
 			/*
-			   	cmp
-			   	B.notcond else
-			   //then:
-			   	// ...
-			   	B after
-			   else:
-			   	// ...
-			   after:
+					cmp
+					B.cond then
+					B else
+				then:
+					// ...
+					B next
+				else:
+					// ...
+					B next
+				next:
 
-			   	cmp
-			   	B.notcond else
-			   //then:
-			   	// ...
-			   else:
+					cmp
+					B.cond then
+					B next
+				then:
+					// ...
+					B next
+				next:
 			*/
 		case *ast.ForStmt:
 			loopCond := newState(s.f, s)
+			loopCond.b().Loop++
 
 			s.alloc(ir.B{Block: loopCond.block})
 
@@ -221,8 +230,6 @@ func (c *Front) compileBlock(ctx context.Context, s *state, b *ast.Block) (_ *st
 			if err != nil {
 				return nil, errors.Wrap(err, "for cond")
 			}
-
-			cond = revCond(cond)
 
 			loopBody := newState(s.f, loopCond)
 
@@ -238,14 +245,15 @@ func (c *Front) compileBlock(ctx context.Context, s *state, b *ast.Block) (_ *st
 			loopCond.addParent(loopBody)
 
 			next := newState(s.f, loopCond)
+			next.b().Loop = s.b().Loop
 
 			loopCond.alloc(ir.BCond{
 				Expr:  condExpr,
 				Cond:  cond,
-				Block: next.block,
+				Block: loopBody.block,
 			})
 
-			loopCond.alloc(ir.B{Block: loopBody.block})
+			loopCond.alloc(ir.B{Block: next.block})
 
 			s = next
 		default:
@@ -289,7 +297,7 @@ func (c *Front) compileExpr(ctx context.Context, s *state, e ast.Expr) (id ir.Ex
 			return -1, errors.Wrap(err, "")
 		}
 
-		id = s.alloc(ir.Word(x))
+		id = s.alloc(ir.Imm(x))
 	case ast.BinOp:
 		l, err := c.compileExpr(ctx, s, e.Left)
 		if err != nil {
@@ -350,6 +358,8 @@ func newState(f *ir.Func, par ...*state) *state {
 	} else {
 		s.cache = par[0].cache
 		s.exit = par[0].exit
+
+		s.b().Loop = par[0].b().Loop
 	}
 
 	return s
@@ -457,6 +467,10 @@ vars:
 	}
 
 	s.par = append(s.par, par)
+}
+
+func (s *state) b() *ir.Block {
+	return &s.f.Blocks[s.block]
 }
 
 func revCond(c ir.Cond) ir.Cond {

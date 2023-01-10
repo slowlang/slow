@@ -13,6 +13,8 @@ type (
 		In  []Param
 		Out []Param
 
+		Entry int
+
 		Exprs  []any
 		Blocks []Block
 	}
@@ -20,6 +22,8 @@ type (
 	Block struct {
 		Phi  []Expr
 		Code []Expr
+
+		Loop int
 	}
 
 	Expr int
@@ -33,7 +37,7 @@ type (
 
 	Arg int
 
-	Word uint64
+	Imm int64
 
 	Add struct {
 		L, R Expr
