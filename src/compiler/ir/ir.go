@@ -20,8 +20,6 @@ type (
 	Block struct {
 		Phi  []Expr
 		Code []Expr
-
-		Next int
 	}
 
 	Expr int
@@ -45,9 +43,9 @@ type (
 		L, R Expr
 	}
 
-	//	B struct {
-	//		Block int
-	//	}
+	B struct {
+		Block int
+	}
 
 	BCond struct {
 		Expr  Expr
@@ -57,3 +55,21 @@ type (
 
 	Phi []Expr
 )
+
+type (
+	Iner interface {
+		In() []Expr
+	}
+)
+
+func (x Add) In() []Expr {
+	return []Expr{x.L, x.R}
+}
+
+func (x Cmp) In() []Expr {
+	return []Expr{x.L, x.R}
+}
+
+func (x BCond) In() []Expr {
+	return []Expr{x.Expr}
+}

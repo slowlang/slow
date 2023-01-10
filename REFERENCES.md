@@ -6,6 +6,10 @@ Simplicity is prerequisite for reliability.
 
 *Edsger W. Dijkstra*
 
+What I cannot create, I do not understand.
+
+*Richard Feynman*
+
 ## Talks
 
 * Rich Hickey - Simple Made Easy ([youtube](https://www.youtube.com/watch?v=LKtk3HCgTa8))

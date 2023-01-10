@@ -59,6 +59,8 @@ func (c *Front) compileFunc(ctx context.Context, p *ir.Package, fn *ast.Func) (e
 		f.In[i].Name = string(p.Name)
 		f.In[i].Expr = id
 
+		f.Blocks[s.block].Code = append(f.Blocks[s.block].Code, id)
+
 		s.define(f.In[i].Name, id)
 	}
 
@@ -124,7 +126,11 @@ func (c *Front) compileBlock(ctx context.Context, s *state, b *ast.Block) (_ *st
 
 			s.define(s.f.Out[0].Name, id)
 
-			s.f.Blocks[s.block].Next = s.exit.block
+			s.alloc(ir.B{
+				Block: s.exit.block,
+			})
+
+			//	s.f.Blocks[s.block].Next = s.exit.block
 			//	s.exit.par = append(s.exit.par, s)
 
 			s.exit.addParent(s)
@@ -209,6 +215,8 @@ func (c *Front) compileBlock(ctx context.Context, s *state, b *ast.Block) (_ *st
 		case *ast.ForStmt:
 			loopCond := newState(s.f, s)
 
+			s.alloc(ir.B{Block: loopCond.block})
+
 			cond, condExpr, err := c.compileCond(ctx, loopCond, x.Cond)
 			if err != nil {
 				return nil, errors.Wrap(err, "for cond")
@@ -223,7 +231,9 @@ func (c *Front) compileBlock(ctx context.Context, s *state, b *ast.Block) (_ *st
 				return nil, errors.Wrap(err, "loop body")
 			}
 
-			s.f.Blocks[loopBody.block].Next = loopCond.block
+			loopBody.alloc(ir.B{
+				Block: loopCond.block,
+			})
 
 			loopCond.addParent(loopBody)
 
@@ -234,6 +244,8 @@ func (c *Front) compileBlock(ctx context.Context, s *state, b *ast.Block) (_ *st
 				Cond:  cond,
 				Block: next.block,
 			})
+
+			loopCond.alloc(ir.B{Block: loopBody.block})
 
 			s = next
 		default:
@@ -319,12 +331,12 @@ func newState(f *ir.Func, par ...*state) *state {
 		par:   par,
 	}
 
-	f.Blocks = append(f.Blocks, ir.Block{Next: -2})
+	f.Blocks = append(f.Blocks, ir.Block{})
 
 	tlog.Printw("new block", "par", len(par), "from", loc.Caller(1))
 
 	if len(par) == 0 {
-		f.Blocks = append(f.Blocks, ir.Block{Next: -2})
+		f.Blocks = append(f.Blocks, ir.Block{})
 
 		s.cache = map[any]ir.Expr{}
 		s.exit = &state{
@@ -335,17 +347,9 @@ func newState(f *ir.Func, par ...*state) *state {
 		}
 
 		s.block = 1
-		f.Blocks[0].Next = -1
 	} else {
 		s.cache = par[0].cache
 		s.exit = par[0].exit
-	}
-
-	for _, p := range par {
-		pb := &f.Blocks[p.block]
-		if pb.Next == -2 {
-			pb.Next = s.block
-		}
 	}
 
 	return s
@@ -402,9 +406,9 @@ parents:
 }
 
 func (s *state) alloc(x any) (id ir.Expr) {
-	if id, ok := s.cache[x]; ok {
-		return id
-	}
+	//	if id, ok := s.cache[x]; ok {
+	//		return id
+	//	}
 
 	id = ir.Expr(len(s.f.Exprs))
 	s.cache[x] = id

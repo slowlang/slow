@@ -71,63 +71,260 @@ _start:
 }
 
 func (c *Compiler) compileFunc(ctx context.Context, a Arch, b []byte, f *ir.Func) (_ []byte, err error) {
-	tlog.Printw("func", "name", f.Name, "in", f.In, "out", f.Out)
+	i2b := make([]int, len(f.Exprs))
 
-	for block := range f.Blocks {
-		b := f.Blocks[block]
-
-		for _, p := range b.Phi {
-			tlog.Printw("block", "id", "__", "block", block, "next", b.Next, "phi", p, "exprs", f.Exprs[p])
-		}
+	for i := range i2b {
+		i2b[i] = -1
 	}
 
-	for _, p := range f.In {
-		e := f.Exprs[p.Expr]
-		tlog.Printw("arg", "id", p.Expr, "block", "_", "type", tlog.FormatNext("%T"), e, "val", e)
-	}
-
-	printBlock := func(block int) {
-		b := f.Blocks[block]
-
+	for block, b := range f.Blocks {
 		for _, id := range b.Phi {
-			e := f.Exprs[id]
-			tlog.Printw("phi", "id", id, "block", block, "type", tlog.FormatNext("%T"), e, "val", e)
+			i2b[id] = block
 		}
 
 		for _, id := range b.Code {
-			e := f.Exprs[id]
-			tlog.Printw("expr", "id", id, "block", block, "type", tlog.FormatNext("%T"), e, "val", e)
+			i2b[id] = block
 		}
+	}
 
-		next := func() interface{} {
-			if b.Next >= 0 {
-				return b.Next
+	tlog.Printw("i2b", "i2b", i2b)
+
+	//
+
+	type life struct {
+		W int
+		R int
+	}
+
+	type block struct {
+		In       []ir.Expr
+		Out      map[int][]ir.Expr // block -> []expr
+		OutBlock map[ir.Expr]int   // expr -> block
+
+		use map[ir.Expr]*life
+	}
+
+	bs := make([]block, len(f.Blocks))
+
+	for block, b := range f.Blocks {
+		bb := &bs[block]
+
+		bb.Out = map[int][]ir.Expr{}
+		bb.OutBlock = map[ir.Expr]int{}
+
+		for _, id := range b.Code {
+			if _, ok := f.Exprs[id].(ir.Arg); ok {
+				bb.In = append(bb.In, id)
 			}
 
-			return "_"
+			if x, ok := f.Exprs[id].(ir.B); ok {
+				bb.OutBlock[id] = x.Block
+			}
+
+			if x, ok := f.Exprs[id].(ir.BCond); ok {
+				bb.OutBlock[id] = x.Block
+			}
+		}
+	}
+
+	for block, b := range f.Blocks {
+		bb := &bs[block]
+
+		for _, id := range b.Phi {
+			p := f.Exprs[id].(ir.Phi)
+
+			bb.In = append(bb.In, id)
+
+			for _, p := range p {
+				bo := &bs[i2b[p]]
+				bo.Out[block] = append(bo.Out[block], p)
+			}
+		}
+	}
+
+	//	for _, p := range f.Out {
+	//		bs[0].Out[-1] = append(bs[0].Out[-1], p.Expr)
+	//	}
+
+	for block, b := range f.Blocks {
+		bb := &bs[block]
+
+		bb.use = map[ir.Expr]*life{}
+
+		for _, e := range bb.In {
+			bb.use[e] = &life{W: -1, R: -1}
 		}
 
-		tlog.Printw("next", "id", "__", "block", block, "next", next())
+		for i, id := range b.Code {
+			e := f.Exprs[id]
+
+			switch e.(type) {
+			case ir.Arg, ir.Word,
+				ir.Add, ir.Cmp:
+				bb.use[id] = &life{W: i, R: -1}
+			}
+
+			switch e := e.(type) {
+			case ir.Arg, ir.Word:
+			case ir.B:
+			case ir.BCond:
+				bb.use[e.Expr].R = i
+			case ir.Add:
+				bb.use[e.L].R = i
+				bb.use[e.R].R = i
+			case ir.Cmp:
+				bb.use[e.L].R = i
+				bb.use[e.R].R = i
+			default:
+				panic(e)
+			}
+		}
 	}
 
-	for block := 1; block < len(f.Blocks); block++ {
-		printBlock(block)
+	for block, bb := range bs {
+		tlog.Printw("block", "block", block, "in", bb.In, "out", bb.Out, "out_block", bb.OutBlock)
 	}
 
-	printBlock(0)
+	for block, bb := range bs {
+		tlog.Printw("block", "block", block, "use", bb.use)
+	}
+
+	X := map[ir.Expr]map[ir.Expr]struct{}{} // expr -> intersect
+
+	for block, b := range f.Blocks {
+		bb := &bs[block]
+		_ = bb
+		_ = b
+
+		for i, id := range b.Code {
+			if _, ok := bb.use[id]; !ok {
+				continue
+			}
+
+			if X[id] == nil {
+				X[id] = map[ir.Expr]struct{}{}
+			}
+
+			for x, life := range bb.use {
+				if id == x {
+					continue
+				}
+
+				//	tlog.Printw("xx", "id", id, "i", i, "x", x, "life", life)
+
+				if i >= life.W && (i < life.R || life.R == -1) {
+					if X[x] == nil {
+						X[x] = map[ir.Expr]struct{}{}
+					}
+
+					X[id][x] = struct{}{}
+					X[x][id] = struct{}{}
+				}
+			}
+		}
+	}
+
+	tlog.Printw("intersections", "X", X)
+
+	{ // print
+		tlog.Printw("func", "name", f.Name, "in", f.In, "out", f.Out)
+
+		//	for block := range f.Blocks {
+		//		b := f.Blocks[block]
+		//
+		//		for _, p := range b.Phi {
+		//			tlog.Printw("block", "id", "__", "block", block, "phi", p, "exprs", f.Exprs[p])
+		//		}
+		//	}
+
+		//	for _, p := range f.In {
+		//		e := f.Exprs[p.Expr]
+		//		tlog.Printw("arg", "block", "_", "id", p.Expr, "type", tlog.FormatNext("%T"), e, "val", e)
+		//	}
+
+		printBlock := func(block int) {
+			b := f.Blocks[block]
+			bb := &bs[block]
+
+			tlog.Printw("block", "block", block, "in", bb.In, "out", bb.Out, "out_block", bb.OutBlock)
+
+			for _, id := range b.Phi {
+				e := f.Exprs[id]
+
+				var x tlog.RawMessage
+				if list, ok := X[id]; ok {
+					x = tlog.AppendKVs(nil, []interface{}{"x", list})
+				}
+
+				tlog.Printw("phi", "block", block, "id", id, "type", tlog.FormatNext("%T"), e, "val", e, x)
+			}
+
+			for _, id := range b.Code {
+				e := f.Exprs[id]
+
+				var x tlog.RawMessage
+				if list, ok := X[id]; ok {
+					x = tlog.AppendKVs(nil, []interface{}{"x", list})
+				}
+
+				tlog.Printw("expr", "block", block, "id", id, "type", tlog.FormatNext("%T"), e, "val", e, x)
+			}
+		}
+
+		for block := 1; block < len(f.Blocks); block++ {
+			printBlock(block)
+		}
+
+		printBlock(0)
+	}
+
+	//
 
 	regmap := map[ir.Expr]int{}
+	need := map[ir.Expr]int{}
 
 	for i, p := range f.In {
 		regmap[p.Expr] = i
 	}
 
+	for i, p := range f.Out {
+		need[p.Expr] = i
+	}
+
 	allocBlock := func(block int) {
+		b := &f.Blocks[block]
+
+		for _, id := range b.Phi {
+			p := f.Exprs[id].(ir.Phi)
+
+			if reg, ok := regmap[id]; ok {
+				for _, p := range p {
+					need[p] = reg
+				}
+			}
+
+			if reg, ok := need[id]; ok {
+				for _, p := range p {
+					need[p] = reg
+				}
+			}
+		}
+
+		for _, id := range b.Code {
+			iner, ok := f.Exprs[id].(ir.Iner)
+			if !ok {
+				continue
+			}
+
+			in := iner.In()
+
+			_ = in
+		}
 	}
 
 	allocBlock(0)
 
-	tlog.Printw("regmap", "map", regmap)
+	tlog.Printw("regmap", "map", regmap, "need", need)
 
 	return b, nil
 }
