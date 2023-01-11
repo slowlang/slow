@@ -222,7 +222,6 @@ func (c *Front) compileBlock(ctx context.Context, s *state, b *ast.Block) (_ *st
 			*/
 		case *ast.ForStmt:
 			loopCond := newState(s.f, s)
-			loopCond.b().Loop++
 
 			s.alloc(ir.B{Block: loopCond.block})
 
@@ -245,7 +244,6 @@ func (c *Front) compileBlock(ctx context.Context, s *state, b *ast.Block) (_ *st
 			loopCond.addParent(loopBody)
 
 			next := newState(s.f, loopCond)
-			next.b().Loop = s.b().Loop
 
 			loopCond.alloc(ir.BCond{
 				Expr:  condExpr,
@@ -358,8 +356,6 @@ func newState(f *ir.Func, par ...*state) *state {
 	} else {
 		s.cache = par[0].cache
 		s.exit = par[0].exit
-
-		s.b().Loop = par[0].b().Loop
 	}
 
 	return s

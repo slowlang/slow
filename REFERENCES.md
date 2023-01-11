@@ -19,6 +19,10 @@ What I cannot create, I do not understand.
 * Rob Pike - The Design of the Go Assembler ([youtube](https://www.youtube.com/watch?v=KINIAgRpkDA), [slides](https://talks.golang.org/2016/asm.slide))
 * Rob Pike on the move from C to Go in the toolchain ([youtube](https://www.youtube.com/watch?v=cF1zJYkBW4A))
 
+## Papers
+
+* Sebastian Hack, Daniel Grund, and Gerhard Goos - Register Allocation for Programs in SSA-Form ([compilers.cs.uni-saarland.de](https://compilers.cs.uni-saarland.de/papers/ssara.pdf))
+
 ## Articles
 
 * Linux I/O Principles and Zero-copy Technology ([www.sobyte.net](https://www.sobyte.net/post/2022-03/linux-io-and-zero-copy/))

@@ -22,8 +22,6 @@ type (
 	Block struct {
 		Phi  []Expr
 		Code []Expr
-
-		Loop int
 	}
 
 	Expr int
