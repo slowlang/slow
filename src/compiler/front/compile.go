@@ -313,6 +313,16 @@ func (c *Front) compileExpr(ctx context.Context, s *state, e ast.Expr) (id ir.Ex
 				L: l,
 				R: r,
 			})
+		case "-":
+			id = s.alloc(ir.Sub{
+				L: l,
+				R: r,
+			})
+		case "*":
+			id = s.alloc(ir.Mul{
+				L: l,
+				R: r,
+			})
 		case "<", ">":
 			id = s.alloc(ir.Cmp{
 				L: l,

@@ -1,0 +1,12 @@
+
+func main(n int) (rc int) {
+	rc = n
+
+	n = n - 1
+	for 1 < n {
+		rc = rc * n
+		n = n - 1
+	}
+
+	return rc
+}

@@ -482,7 +482,7 @@ again:
 		';', '\n', '\t':
 
 		return Char(fc.b[i]), st, i + 1
-	case '=', '+', '-', '>', '<', '&', '|':
+	case '=', '+', '-', '*', '/', '>', '<', '&', '|':
 		if i+1 < fc.lim && (fc.b[i+1] == c || fc.b[i+1] == '=') {
 			return ast.Op(fc.b[i : i+2]), st, i + 2
 		}

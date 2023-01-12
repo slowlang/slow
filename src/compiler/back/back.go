@@ -117,6 +117,56 @@ func (c *Compiler) compileFunc(ctx context.Context, a Arch, b []byte, f *ir.Func
 	regmap := map[ir.Expr]int{}
 	phifix := map[int]map[int][][2]int{} // block-to -> block-from -> list of {DST, SRC regs}
 
+	printProg := func() { // print
+		tlog.Printw("func", "name", f.Name, "entry", f.Entry, "in", len(f.In), "out", len(f.Out))
+
+		for i, p := range f.In {
+			x := f.Exprs[p.Expr]
+
+			tlog.Printw("arg", "block", tlog.None, "id", p.Expr, "type", tlog.FormatNext("%T"), x, "val", x, "reg", i)
+		}
+
+		for _, p := range f.Out {
+			x := f.Exprs[p.Expr]
+
+			tlog.Printw("res", "block", tlog.None, "id", p.Expr, "type", tlog.FormatNext("%T"), x, "val", x, "reg", regmap[p.Expr])
+		}
+
+		allBlocks(func(block int, bp *ir.Block) {
+			//	tlog.Printw("block", "block", block, "loop", b.Loop)
+
+			for _, id := range bp.Phi {
+				x := f.Exprs[id]
+
+				args := []any{"block", block, "id", id, "type", tlog.FormatNext("%T"), x, "val", x}
+				if reg, ok := regmap[id]; ok {
+					args = append(args, "reg", reg)
+				}
+				//	if len(life[id]) != 0 {
+				//		args = append(args, "life", life[id])
+				//	}
+
+				tlog.Printw("phi", args...)
+			}
+
+			for _, id := range bp.Code {
+				x := f.Exprs[id]
+
+				args := []any{"block", block, "id", id, "type", tlog.FormatNext("%T"), x, "val", x}
+				if reg, ok := regmap[id]; ok {
+					args = append(args, "reg", reg)
+				}
+				//	if len(life[id]) != 0 {
+				//		args = append(args, "life", life[id])
+				//	}
+
+				tlog.Printw("code", args...)
+			}
+		})
+	}
+
+	printProg()
+
 	{ // alloc
 		// life times
 
@@ -170,6 +220,12 @@ func (c *Compiler) compileFunc(ctx context.Context, a Arch, b []byte, f *ir.Func
 				case ir.Add:
 					life[x.L] = id
 					life[x.R] = id
+				case ir.Sub:
+					life[x.L] = id
+					life[x.R] = id
+				case ir.Mul:
+					life[x.L] = id
+					life[x.R] = id
 				case ir.Cmp:
 					life[x.L] = id
 					life[x.R] = id
@@ -219,7 +275,7 @@ func (c *Compiler) compileFunc(ctx context.Context, a Arch, b []byte, f *ir.Func
 		content := map[int][]ir.Expr{}
 
 		add := func(id ir.Expr) {
-			gr := len(group)
+			gr := int(id)
 			group[id] = gr
 			content[gr] = []ir.Expr{id}
 		}
@@ -260,7 +316,7 @@ func (c *Compiler) compileFunc(ctx context.Context, a Arch, b []byte, f *ir.Func
 				x := f.Exprs[id]
 
 				switch x.(type) {
-				case ir.Imm, ir.Add, ir.Cmp:
+				case ir.Imm, ir.Add, ir.Sub, ir.Mul, ir.Cmp:
 					add(id)
 				case ir.B, ir.BCond:
 				default:
@@ -269,7 +325,7 @@ func (c *Compiler) compileFunc(ctx context.Context, a Arch, b []byte, f *ir.Func
 			}
 		})
 
-		tlog.Printw("groups initial", "groups", len(content))
+		tlog.Printw("groups initial", "groups", len(content), "groups", content)
 
 		allBlocks(func(block int, bp *ir.Block) {
 			for _, id := range bp.Phi {
@@ -281,7 +337,7 @@ func (c *Compiler) compileFunc(ctx context.Context, a Arch, b []byte, f *ir.Func
 			}
 		})
 
-		tlog.Printw("groups after phi", "groups", len(content))
+		tlog.Printw("groups after phi", "groups", len(content), "groups", content)
 
 		allBlocks(func(block int, bp *ir.Block) {
 			for _, id := range bp.Code {
@@ -289,6 +345,12 @@ func (c *Compiler) compileFunc(ctx context.Context, a Arch, b []byte, f *ir.Func
 
 				switch x := x.(type) {
 				case ir.Add:
+					merge(id, x.L)
+					merge(id, x.R)
+				case ir.Sub:
+					merge(id, x.L)
+					merge(id, x.R)
+				case ir.Mul:
 					merge(id, x.L)
 					merge(id, x.R)
 				case ir.Cmp:
@@ -299,7 +361,7 @@ func (c *Compiler) compileFunc(ctx context.Context, a Arch, b []byte, f *ir.Func
 			}
 		})
 
-		tlog.Printw("groups after ops", "groups", len(content))
+		tlog.Printw("groups after ops", "groups", len(content), "groups", content)
 
 		for i, p := range f.In {
 			if i < len(f.Out) {
@@ -317,9 +379,9 @@ func (c *Compiler) compileFunc(ctx context.Context, a Arch, b []byte, f *ir.Func
 			}
 		}
 
-		tlog.Printw("groups after all-with-all", "groups", len(content))
+		tlog.Printw("groups after all-with-all", "groups", len(content), "groups", content)
 
-		tlog.Printw("group", "group", group, "content", content)
+		tlog.Printw("group", "expr2group", group)
 
 		// assign registers
 
@@ -364,54 +426,6 @@ func (c *Compiler) compileFunc(ctx context.Context, a Arch, b []byte, f *ir.Func
 
 					phifix[block][from] = append(phifix[block][from], [2]int{gr2reg[group[id]], gr2reg[group[xx]]})
 				}
-			}
-		})
-	}
-
-	{ // print
-		tlog.Printw("func", "name", f.Name, "entry", f.Entry, "in", len(f.In), "out", len(f.Out))
-
-		for i, p := range f.In {
-			x := f.Exprs[p.Expr]
-
-			tlog.Printw("arg", "block", tlog.None, "id", p.Expr, "type", tlog.FormatNext("%T"), x, "val", x, "reg", i)
-		}
-
-		for _, p := range f.Out {
-			x := f.Exprs[p.Expr]
-
-			tlog.Printw("res", "block", tlog.None, "id", p.Expr, "type", tlog.FormatNext("%T"), x, "val", x, "reg", regmap[p.Expr])
-		}
-
-		allBlocks(func(block int, bp *ir.Block) {
-			//	tlog.Printw("block", "block", block, "loop", b.Loop)
-
-			for _, id := range bp.Phi {
-				x := f.Exprs[id]
-
-				args := []any{"block", block, "id", id, "type", tlog.FormatNext("%T"), x, "val", x}
-				if reg, ok := regmap[id]; ok {
-					args = append(args, "reg", reg)
-				}
-				//	if len(life[id]) != 0 {
-				//		args = append(args, "life", life[id])
-				//	}
-
-				tlog.Printw("phi", args...)
-			}
-
-			for _, id := range bp.Code {
-				x := f.Exprs[id]
-
-				args := []any{"block", block, "id", id, "type", tlog.FormatNext("%T"), x, "val", x}
-				if reg, ok := regmap[id]; ok {
-					args = append(args, "reg", reg)
-				}
-				//	if len(life[id]) != 0 {
-				//		args = append(args, "life", life[id])
-				//	}
-
-				tlog.Printw("code", args...)
 			}
 		})
 	}
@@ -472,6 +486,10 @@ _%[1]v:
 					b = fmt.Appendf(b, "	MOV	X%d, #%d	// expr %d\n", reg(id), x, id)
 				case ir.Add:
 					b = fmt.Appendf(b, "	ADD	X%d, X%d, X%d	// expr %d\n", reg(id), reg(x.L), reg(x.R), id)
+				case ir.Sub:
+					b = fmt.Appendf(b, "	SUB	X%d, X%d, X%d	// expr %d\n", reg(id), reg(x.L), reg(x.R), id)
+				case ir.Mul:
+					b = fmt.Appendf(b, "	MUL	X%d, X%d, X%d	// expr %d\n", reg(id), reg(x.L), reg(x.R), id)
 				case ir.Cmp:
 					b = fmt.Appendf(b, "	CMP	X%d, X%d	// expr %d\n", reg(x.L), reg(x.R), id)
 				case ir.B:

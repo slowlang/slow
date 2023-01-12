@@ -41,6 +41,14 @@ type (
 		L, R Expr
 	}
 
+	Sub struct {
+		L, R Expr
+	}
+
+	Mul struct {
+		L, R Expr
+	}
+
 	Cmp struct {
 		L, R Expr
 	}
