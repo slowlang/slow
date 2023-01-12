@@ -244,17 +244,41 @@ func (c *Compiler) compileFunc(ctx context.Context, a Arch, b []byte, f *ir.Func
 				return false
 			}
 
-			xe, ok := life[x]
-			if !ok {
-				panic(x)
+			block := i2b[x]
+			bp := &f.Blocks[block]
+
+			xlive, ylive := false, false
+
+			for _, id := range bp.Phi {
+				if id == x {
+					xlive = true
+				}
+				if id == y {
+					ylive = true
+				}
 			}
 
-			ye, ok := life[y]
-			if !ok {
-				panic(y)
+			for _, id := range bp.Code {
+				if xlive && ylive {
+					return true
+				}
+
+				if id == x {
+					xlive = true
+				}
+				if id == y {
+					ylive = true
+				}
+
+				if id == life[x] {
+					xlive = false
+				}
+				if id == life[y] {
+					ylive = false
+				}
 			}
 
-			return x < ye && y < xe
+			return false
 		}
 
 		byw := make([]Range, 0, len(life))
