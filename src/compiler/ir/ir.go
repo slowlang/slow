@@ -45,7 +45,7 @@ type (
 		L, R Expr
 	}
 
-	Label string
+	Label int
 
 	B struct {
 		Label Label

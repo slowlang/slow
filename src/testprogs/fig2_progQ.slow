@@ -1,0 +1,14 @@
+
+func main() (rc int) {
+	i = 1
+	j = 1
+
+	for {
+		if i < 10 {
+			return j
+		}
+
+		j = j + i
+		i = j + 1
+	}
+}

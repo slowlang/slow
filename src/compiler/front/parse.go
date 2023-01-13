@@ -309,9 +309,16 @@ func (fc *Front) parseIf(ctx context.Context, st, vst int) (x *ast.IfStmt, i int
 }
 
 func (fc *Front) parseFor(ctx context.Context, st, vst int) (x ast.Stmt, i int, err error) {
-	exp, i, err := fc.parseExpr(ctx, vst)
-	if err != nil {
-		return nil, i, errors.Wrap(err, "condition")
+	var exp ast.Expr
+
+	i = vst
+
+	tk, _, _ := fc.next(ctx, i)
+	if tk != Char('{') {
+		exp, i, err = fc.parseExpr(ctx, i)
+		if err != nil {
+			return nil, i, errors.Wrap(err, "condition")
+		}
 	}
 
 	b, i, err := fc.parseBlock(ctx, i)

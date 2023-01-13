@@ -7,6 +7,7 @@ import (
 	"unsafe"
 
 	"github.com/nikandfor/errors"
+	"github.com/nikandfor/loc"
 	"github.com/nikandfor/tlog"
 	"github.com/slowlang/slow/src/compiler/ast"
 	"github.com/slowlang/slow/src/compiler/ir"
@@ -15,6 +16,11 @@ import (
 type (
 	global struct {
 		exprs []any
+		exit  ir.Label
+
+		ret []ir.Phi
+
+		ir.Label
 	}
 
 	Scope struct {
@@ -27,6 +33,8 @@ type (
 		code []ir.Expr
 
 		par []*Scope
+
+		deadend bool
 	}
 )
 
@@ -52,7 +60,11 @@ func (c *Front) compileFunc(ctx context.Context, p *ir.Package, fn *ast.Func) (e
 		Out:  make([]ir.Param, len(fn.RetArgs)),
 	}
 
-	s := newScope("prologue")
+	p.Funcs = append(p.Funcs, f)
+
+	s := newScope(-1)
+
+	s.global.ret = make([]ir.Phi, len(fn.RetArgs))
 
 	for i, p := range fn.Args {
 		a := ir.Arg(i)
@@ -79,17 +91,29 @@ func (c *Front) compileFunc(ctx context.Context, p *ir.Package, fn *ast.Func) (e
 		return errors.Wrap(err, "body")
 	}
 
-	exit := newScope("epilogue", end)
+	if !end.deadend {
+		end.addcode(ir.B{Label: s.exit})
+	}
 
-	p.Funcs = append(p.Funcs, f)
+	exit := newScope(s.exit, end)
 
-	for i, p := range f.Out {
-		id := exit.findVar(p.Name)
+	for i := range f.Out {
+		id := exit.alloc(s.global.ret[i])
 
 		f.Out[i].Expr = id
+
+		tlog.Printw("return", "i", i, "id", id)
+	}
+
+	for id, x := range s.global.exprs {
+		tlog.Printw("global expr", "id", id, "typ", tlog.FormatNext("%T"), x, "val", x)
 	}
 
 	rename := make([]ir.Expr, len(s.exprs))
+
+	for i := range rename {
+		rename[i] = -2
+	}
 
 	add := func(ids ...ir.Expr) {
 		for _, id := range ids {
@@ -114,18 +138,51 @@ func (c *Front) compileFunc(ctx context.Context, p *ir.Package, fn *ast.Func) (e
 			par[i] = unsafe.Pointer(p)
 		}
 
-		tlog.Printw("scope", "label", s.Label, "phi", s.phi, "vars", s.vars, "p", unsafe.Pointer(s), "par", par)
+		var lab ir.Label = -1
 
-		add(s.Label)
+		if s.Label >= 0 {
+			lab = s.exprs[s.Label].(ir.Label)
+		}
+
+		var next ir.Label = -1
+		var bcond []ir.Label
+
+		for _, id := range s.code {
+			switch x := s.exprs[id].(type) {
+			case ir.BCond:
+				bcond = append(bcond, x.Label)
+			case ir.B:
+				next = x.Label
+			}
+		}
+		if l := len(s.code); l != 0 {
+			if b, ok := s.exprs[s.code[l-1]].(ir.B); ok {
+				next = b.Label
+			}
+		}
+
+		tlog.Printw("scope", "label", lab, "next", next, "bcond", bcond, "phi", s.phi, "vars", s.vars, "p", unsafe.Pointer(s), "par", par)
+
+		if s.Label >= 0 {
+			add(s.Label)
+		}
 
 		for _, id := range s.phi {
 			add(id)
+		}
+
+		if s == exit {
+			for _, p := range f.Out {
+				add(p.Expr)
+			}
 		}
 
 		add(s.code...)
 	}
 
 	pr(exit)
+
+	tlog.Printw("rename", "rename", rename)
 
 	for i, y := range f.Code {
 		switch x := y.(type) {
@@ -152,10 +209,16 @@ func (c *Front) compileFunc(ctx context.Context, p *ir.Package, fn *ast.Func) (e
 		f.Code[i] = y
 	}
 
-	tlog.Printw("func ir", "name", f.Name, "in", f.In, "out", f.Out)
+	for i := range f.Out {
+		f.Out[i].Expr = rename[f.Out[i].Expr]
+	}
 
-	for id, x := range f.Code {
-		tlog.Printw("func code", "id", id, "typ", tlog.FormatNext("%T"), x, "val", x)
+	if tlog.If("dump") {
+		tlog.Printw("func ir", "name", f.Name, "in", f.In, "out", f.Out)
+
+		for id, x := range f.Code {
+			tlog.Printw("func code", "id", id, "typ", tlog.FormatNext("%T"), x, "val", x)
+		}
 	}
 
 	return nil
@@ -170,9 +233,13 @@ func (c *Front) compileBlock(ctx context.Context, s *Scope, b *ast.Block) (_ *Sc
 				return nil, errors.Wrap(err, "return value")
 			}
 
-			_ = id
+			s.ret(id)
 
-			// TODO
+			s.expr(ir.B{
+				Label: s.exit,
+			})
+
+			return s, nil
 		case ast.Assignment:
 			id, err := c.compileExpr(ctx, s, x.Rhs)
 			if err != nil {
@@ -209,8 +276,36 @@ func (c *Front) compileIf(ctx context.Context, s *Scope, x *ast.IfStmt) (_ *Scop
 		return nil, errors.Wrap(err, "if cond")
 	}
 
-	thenLabel := ir.Label(fmt.Sprintf("then_%d", condExpr))
-	endLabel := ir.Label(fmt.Sprintf("endif_%d", condExpr))
+	if x.Else == nil {
+		thenLabel := s.label()
+		endLabel := s.label()
+
+		cond = revCond(cond)
+
+		s.addcode(ir.BCond{
+			Expr:  condExpr,
+			Cond:  cond,
+			Label: endLabel,
+		})
+
+		s.addcode(ir.B{
+			Label: thenLabel,
+		})
+
+		then := newScope(thenLabel, s)
+
+		then, err = c.compileBlock(ctx, then, x.Then)
+		if err != nil {
+			return nil, errors.Wrap(err, "then")
+		}
+
+		s = newScope(endLabel, s, then)
+
+		return s, nil
+	}
+
+	thenLabel := s.label()
+	endLabel := s.label()
 
 	s.addcode(ir.BCond{
 		Expr:  condExpr,
@@ -221,7 +316,7 @@ func (c *Front) compileIf(ctx context.Context, s *Scope, x *ast.IfStmt) (_ *Scop
 	var elseLabel ir.Label
 
 	if x.Else != nil {
-		elseLabel = ir.Label(fmt.Sprintf("else_%d", condExpr))
+		elseLabel = s.label()
 	} else {
 		elseLabel = endLabel
 	}
@@ -229,8 +324,6 @@ func (c *Front) compileIf(ctx context.Context, s *Scope, x *ast.IfStmt) (_ *Scop
 	s.expr(ir.B{
 		Label: elseLabel,
 	})
-
-	s.addcode(thenLabel)
 
 	then := newScope(thenLabel, s)
 
@@ -260,8 +353,32 @@ func (c *Front) compileIf(ctx context.Context, s *Scope, x *ast.IfStmt) (_ *Scop
 }
 
 func (c *Front) compileFor(ctx context.Context, s *Scope, x *ast.ForStmt) (_ *Scope, err error) {
-	loopID := x.Pos
-	condLabel := ir.Label(fmt.Sprintf("forcond_%d", loopID))
+	if x.Cond == nil {
+		bodyLabel := s.label()
+
+		s.addcode(ir.B{Label: bodyLabel})
+
+		loopBodyStart := newScope(bodyLabel, s)
+
+		loopBody, err := c.compileBlock(ctx, loopBodyStart, x.Body)
+		if err != nil {
+			return nil, errors.Wrap(err, "loop body")
+		}
+
+		loopBodyStart.addParent(loopBody)
+
+		loopBody.addcode(ir.B{
+			Label: bodyLabel,
+		})
+
+		s = loopBody
+
+		s.deadend = true
+
+		return s, nil
+	}
+
+	condLabel := s.label()
 
 	s.addcode(ir.B{
 		Label: condLabel,
@@ -274,7 +391,7 @@ func (c *Front) compileFor(ctx context.Context, s *Scope, x *ast.ForStmt) (_ *Sc
 		return nil, errors.Wrap(err, "for cond")
 	}
 
-	bodyLabel := ir.Label(fmt.Sprintf("forbody_%d", loopID))
+	bodyLabel := s.label()
 
 	loopCond.addcode(ir.BCond{
 		Expr:  condExpr,
@@ -282,7 +399,7 @@ func (c *Front) compileFor(ctx context.Context, s *Scope, x *ast.ForStmt) (_ *Sc
 		Label: bodyLabel,
 	})
 
-	endLabel := ir.Label(fmt.Sprintf("endfor_%d", loopID))
+	endLabel := s.label()
 
 	loopCond.addcode(ir.B{
 		Label: endLabel,
@@ -327,7 +444,7 @@ func (c *Front) compileCond(ctx context.Context, s *Scope, e ast.Expr) (cc ir.Co
 func (c *Front) compileExpr(ctx context.Context, s *Scope, e ast.Expr) (id ir.Expr, err error) {
 	switch e := e.(type) {
 	case ast.Ident:
-		id = s.findVar(string(e))
+		id = s.findVar(string(e), nil)
 		if id < 0 {
 			return id, errors.New("undefined var: %s", e)
 		}
@@ -386,19 +503,28 @@ func (c *Front) compileExpr(ctx context.Context, s *Scope, e ast.Expr) (id ir.Ex
 
 func newScope(l ir.Label, par ...*Scope) *Scope {
 	s := &Scope{
+		Label: -1,
+
 		vars: map[string]ir.Expr{},
 		phi:  map[string]ir.Expr{},
-
-		par: par,
 	}
+
+	tlog.Printw("new scope", "label", l, "par", len(par), "from", loc.Callers(1, 4))
 
 	if len(par) == 0 {
 		s.global = &global{}
+		s.exit = s.label()
 	} else {
 		s.global = par[0].global
 	}
 
-	s.Label = s.alloc(l)
+	if l >= 0 {
+		s.Label = s.alloc(l)
+	}
+
+	for _, par := range par {
+		s.addParent(par)
+	}
 
 	return s
 }
@@ -431,10 +557,20 @@ func (s *Scope) define(name string, id ir.Expr) {
 	s.vars[name] = id
 }
 
-func (s *Scope) findVar(name string) (id ir.Expr) {
+func (s *Scope) findVar(name string, stop map[*Scope]struct{}) (id ir.Expr) {
 	//	defer func() {
 	//		tlog.Printw("scope findvar", "l", s.Label, "name", name, "id", id, "from", loc.Callers(1, 4))
 	//	}()
+
+	if _, ok := stop[s]; ok {
+		return -1
+	}
+
+	if stop == nil {
+		stop = map[*Scope]struct{}{}
+	}
+
+	stop[s] = struct{}{}
 
 	id, ok := s.vars[name]
 	if ok {
@@ -454,7 +590,11 @@ func (s *Scope) findVar(name string) (id ir.Expr) {
 
 parents:
 	for _, p := range s.par {
-		id := p.findVar(name)
+		if p.deadend {
+			continue
+		}
+
+		id := p.findVar(name, stop)
 		if id == -1 {
 			continue
 		}
@@ -472,13 +612,11 @@ parents:
 		return -1
 	}
 
-	//	if len(phi) == 1 {
-	//		return phi[0]
-	//	}
-
 	id = s.alloc(phi)
 
 	s.phi[name] = id
+
+	tlog.Printw("new phi", "id", id, "name", name, "label", s.Label, "from", loc.Callers(1, 4))
 
 	return id
 }
@@ -487,7 +625,7 @@ func (s *Scope) addParent(par *Scope) {
 	s.par = append(s.par, par)
 
 	for name, id := range s.phi {
-		alt := par.findVar(name)
+		alt := par.findVar(name, nil)
 		if alt == -1 {
 			continue
 		}
@@ -497,5 +635,50 @@ func (s *Scope) addParent(par *Scope) {
 		phi = append(phi, alt)
 
 		s.exprs[id] = phi
+	}
+}
+
+func (s *Scope) ret(ids ...ir.Expr) {
+	if len(ids) != len(s.global.ret) {
+		panic(len(ids))
+	}
+
+	s.deadend = true
+
+out:
+	for i, id := range ids {
+		for _, x := range s.global.ret[i] {
+			if x == id {
+				continue out
+			}
+		}
+
+		s.global.ret[i] = append(s.global.ret[i], id)
+	}
+}
+
+func (s *global) label() (l ir.Label) {
+	l = s.Label
+	s.Label++
+
+	return l
+}
+
+func revCond(c ir.Cond) ir.Cond {
+	switch c {
+	case "<":
+		return ">="
+	case ">":
+		return "<="
+	case "<=":
+		return ">"
+	case ">=":
+		return "<"
+	case "==":
+		return "!="
+	case "!=":
+		return "=="
+	default:
+		panic(string(c))
 	}
 }
