@@ -17,7 +17,7 @@ func CompileFile(ctx context.Context, name string) (obj []byte, err error) {
 		return nil, errors.Wrap(err, "read file")
 	}
 
-	tlog.SpanFromContext(ctx).Printw("read file", "size", len(text), "name", name)
+	tlog.SpanFromContext(ctx).Printw("read file", "size", len(text), "path", name)
 
 	return Compile(ctx, name, text)
 }
