@@ -1,0 +1,13 @@
+package main
+
+func main(a int) (r int) {
+	return fib(a)
+}
+
+func fib(n int) (r int) {
+	if n <= 1 {
+		return n
+	}
+
+	return fib(n-1) + fib(n-2)
+}

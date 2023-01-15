@@ -12,4 +12,4 @@ testprogs/%.o: testprogs/%.s
 
 .PRECIOUS: %.s
 testprogs/%.s: testprogs/%.slow Makefile $(wildcard ./cmd/slow/*.go) $(wildcard ./compiler/*.go) $(wildcard ./compiler/*/*.go)
-	go run ./cmd/slow compile $< | tee $@
+	go run ./cmd/slow compile $< >$@ && cat $@

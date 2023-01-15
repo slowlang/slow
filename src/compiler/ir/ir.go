@@ -47,6 +47,13 @@ type (
 		L, R Expr
 	}
 
+	Call struct {
+		Func string
+
+		In  []Expr
+		Out []Expr
+	}
+
 	Label int
 
 	B struct {

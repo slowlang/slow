@@ -1,0 +1,17 @@
+package main
+
+func main(a int) int {
+	return gcn(a, 120)
+}
+
+func gcn(x, y int) int {
+	if x < y {
+		x, y = y, x
+	}
+
+	if y == 0 {
+		return x
+	}
+
+	return gcn(x-y, y)
+}

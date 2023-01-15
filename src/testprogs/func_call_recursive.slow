@@ -1,0 +1,13 @@
+package main
+
+func main(a int) int {
+	return f(4, a)
+}
+
+func f(x, y int) int {
+	if x == 0 {
+		return y
+	}
+
+	return f(x-1, y+1)
+}
