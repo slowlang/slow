@@ -25,7 +25,10 @@ func CompileFile(ctx context.Context, name string) (obj []byte, err error) {
 func Compile(ctx context.Context, name string, text []byte) (obj []byte, err error) {
 	f := front.New()
 
-	f.AddFile(ctx, name, text)
+	err = f.AddFile(ctx, name, text)
+	if err != nil {
+		return nil, errors.Wrap(err, "add file")
+	}
 
 	err = f.Parse(ctx)
 	if err != nil {

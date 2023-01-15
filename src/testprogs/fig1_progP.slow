@@ -1,3 +1,4 @@
+package main
 
 func main() (rc int) {
 	a = 1

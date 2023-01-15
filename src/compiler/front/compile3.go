@@ -3,20 +3,22 @@ package front
 import (
 	"context"
 	"fmt"
+	"go/ast"
+	"go/token"
 	"strconv"
 	"unsafe"
 
 	"github.com/nikandfor/errors"
 	"github.com/nikandfor/loc"
 	"github.com/nikandfor/tlog"
-	"github.com/slowlang/slow/src/compiler/ast"
+
 	"github.com/slowlang/slow/src/compiler/ir"
 )
 
 type (
 	global struct {
-		exprs []any
-		exit  ir.Label
+		*ir.Package
+		exit ir.Label
 
 		ret []ir.Phi
 
@@ -42,10 +44,12 @@ func (c *Front) Compile(ctx context.Context) (p *ir.Package, err error) {
 	p = &ir.Package{}
 
 	for _, f := range c.files {
-		for _, fn := range f.parsed.Funcs {
-			err = c.compileFunc(ctx, p, fn)
+		tlog.Printw("file", "f", f)
+
+		for _, d := range f.Decls {
+			err = c.compileDecl(ctx, p, d)
 			if err != nil {
-				return nil, errors.Wrap(err, "func %v", fn.Name)
+				return nil, errors.Wrap(err, "decl %T", d)
 			}
 		}
 	}
@@ -53,38 +57,66 @@ func (c *Front) Compile(ctx context.Context) (p *ir.Package, err error) {
 	return p, nil
 }
 
-func (c *Front) compileFunc(ctx context.Context, p *ir.Package, fn *ast.Func) (err error) {
-	f := &ir.Func{
-		Name: fn.Name,
-		In:   make([]ir.Param, len(fn.Args)),
-		Out:  make([]ir.Param, len(fn.RetArgs)),
+func (c *Front) compileDecl(ctx context.Context, p *ir.Package, d ast.Decl) (err error) {
+	switch d := d.(type) {
+	case *ast.FuncDecl:
+		return c.compileFunc(ctx, p, d)
+	default:
+		panic(d)
 	}
+}
+
+func (c *Front) compileFunc(ctx context.Context, p *ir.Package, fn *ast.FuncDecl) (err error) {
+	f := &ir.Func{
+		Name: fn.Name.Name,
+	}
+
+	tlog.Printw("compile func", "name", f.Name)
 
 	p.Funcs = append(p.Funcs, f)
 
 	s := newScope(-1)
+	s.Package = p
 
-	s.global.ret = make([]ir.Phi, len(fn.RetArgs))
+	exprStart := len(p.Exprs)
 
-	for i, p := range fn.Args {
-		a := ir.Arg(i)
+	for _, p := range fn.Type.Params.List {
+		for _, name := range p.Names {
+			a := ir.Arg(len(f.In))
+			id := s.expr(a)
+			p := ir.Param{
+				Name: name.Name,
+				Expr: id,
+			}
 
-		id := s.expr(a)
+			s.define(p.Name, id)
 
-		f.In[i].Name = string(p.Name)
-		f.In[i].Expr = id
-
-		s.define(f.In[i].Name, id)
-	}
-
-	for i, p := range fn.RetArgs {
-		f.Out[i].Name = string(p.Name)
-		f.Out[i].Expr = -1
-
-		if f.Out[i].Name == "" {
-			f.Out[i].Name = fmt.Sprintf("ret_%d", i)
+			f.In = append(f.In, p)
 		}
 	}
+
+	for _, p := range fn.Type.Results.List {
+		if len(p.Names) == 0 {
+			p := ir.Param{
+				Expr: -1,
+			}
+
+			f.Out = append(f.Out, p)
+
+			continue
+		}
+
+		for _, name := range p.Names {
+			p := ir.Param{
+				Name: name.Name,
+				Expr: -1,
+			}
+
+			f.Out = append(f.Out, p)
+		}
+	}
+
+	s.global.ret = make([]ir.Phi, len(f.Out))
 
 	end, err := c.compileBlock(ctx, s, fn.Body)
 	if err != nil {
@@ -105,21 +137,13 @@ func (c *Front) compileFunc(ctx context.Context, p *ir.Package, fn *ast.Func) (e
 		tlog.Printw("return", "i", i, "id", id)
 	}
 
-	for id, x := range s.global.exprs {
-		tlog.Printw("global expr", "id", id, "typ", tlog.FormatNext("%T"), x, "val", x)
-	}
-
-	rename := make([]ir.Expr, len(s.exprs))
-
-	for i := range rename {
-		rename[i] = -2
+	for i, x := range s.global.Package.Exprs[exprStart:] {
+		id := ir.Expr(exprStart + i)
+		tlog.Printw("expr", "id", id, "typ", tlog.FormatNext("%T"), x, "val", x)
 	}
 
 	add := func(ids ...ir.Expr) {
-		for _, id := range ids {
-			rename[id] = ir.Expr(len(f.Code))
-			f.Code = append(f.Code, s.exprs[id])
-		}
+		f.Code = append(f.Code, ids...)
 	}
 
 	done := map[*Scope]struct{}{}
@@ -141,14 +165,14 @@ func (c *Front) compileFunc(ctx context.Context, p *ir.Package, fn *ast.Func) (e
 		var lab ir.Label = -1
 
 		if s.Label >= 0 {
-			lab = s.exprs[s.Label].(ir.Label)
+			lab = p.Exprs[s.Label].(ir.Label)
 		}
 
 		var next ir.Label = -1
 		var bcond []ir.Label
 
 		for _, id := range s.code {
-			switch x := s.exprs[id].(type) {
+			switch x := p.Exprs[id].(type) {
 			case ir.BCond:
 				bcond = append(bcond, x.Label)
 			case ir.B:
@@ -156,7 +180,7 @@ func (c *Front) compileFunc(ctx context.Context, p *ir.Package, fn *ast.Func) (e
 			}
 		}
 		if l := len(s.code); l != 0 {
-			if b, ok := s.exprs[s.code[l-1]].(ir.B); ok {
+			if b, ok := p.Exprs[s.code[l-1]].(ir.B); ok {
 				next = b.Label
 			}
 		}
@@ -182,41 +206,12 @@ func (c *Front) compileFunc(ctx context.Context, p *ir.Package, fn *ast.Func) (e
 
 	pr(exit)
 
-	tlog.Printw("rename", "rename", rename)
-
-	for i, y := range f.Code {
-		switch x := y.(type) {
-		case ir.Label, ir.Arg, ir.Imm, ir.B:
-		case ir.Cmp:
-			y = ir.Cmp{L: rename[x.L], R: rename[x.R]}
-		case ir.Add:
-			y = ir.Add{L: rename[x.L], R: rename[x.R]}
-		case ir.Sub:
-			y = ir.Sub{L: rename[x.L], R: rename[x.R]}
-		case ir.Mul:
-			y = ir.Mul{L: rename[x.L], R: rename[x.R]}
-		case ir.BCond:
-			x.Expr = rename[x.Expr]
-			y = x
-		case ir.Phi:
-			for j := range x {
-				x[j] = rename[x[j]]
-			}
-		default:
-			panic(x)
-		}
-
-		f.Code[i] = y
-	}
-
-	for i := range f.Out {
-		f.Out[i].Expr = rename[f.Out[i].Expr]
-	}
-
 	if tlog.If("dump") {
 		tlog.Printw("func ir", "name", f.Name, "in", f.In, "out", f.Out)
 
-		for id, x := range f.Code {
+		for _, id := range f.Code {
+			x := p.Exprs[id]
+
 			tlog.Printw("func code", "id", id, "typ", tlog.FormatNext("%T"), x, "val", x)
 		}
 	}
@@ -224,34 +219,48 @@ func (c *Front) compileFunc(ctx context.Context, p *ir.Package, fn *ast.Func) (e
 	return nil
 }
 
-func (c *Front) compileBlock(ctx context.Context, s *Scope, b *ast.Block) (_ *Scope, err error) {
-	for _, x := range b.Stmts {
+func (c *Front) compileBlock(ctx context.Context, s *Scope, b *ast.BlockStmt) (_ *Scope, err error) {
+	for _, x := range b.List {
 		switch x := x.(type) {
-		case ast.Return:
-			id, err := c.compileExpr(ctx, s, x.Value)
-			if err != nil {
-				return nil, errors.Wrap(err, "return value")
+		case *ast.ReturnStmt:
+			ids := make([]ir.Expr, len(x.Results))
+
+			for i, e := range x.Results {
+				ids[i], err = c.compileExpr(ctx, s, e)
+				if err != nil {
+					return nil, errors.Wrap(err, "return value")
+				}
 			}
 
-			s.ret(id)
+			s.ret(ids...)
 
-			s.expr(ir.B{
+			s.addcode(ir.B{
 				Label: s.exit,
 			})
 
 			return s, nil
-		case ast.Assignment:
-			id, err := c.compileExpr(ctx, s, x.Rhs)
-			if err != nil {
-				return nil, errors.Wrap(err, "assignment rhs")
+		case *ast.AssignStmt:
+			if len(x.Lhs) != len(x.Rhs) {
+				panic("bad assign")
 			}
 
-			v, ok := x.Lhs.(ast.Ident)
-			if !ok {
-				return nil, errors.New("unsupported lexpr: %T", x.Lhs)
+			ids := make([]ir.Expr, len(x.Rhs))
+
+			for i, e := range x.Rhs {
+				ids[i], err = c.compileExpr(ctx, s, e)
+				if err != nil {
+					return nil, errors.Wrap(err, "assignment rhs")
+				}
 			}
 
-			s.define(string(v), id)
+			for i, e := range x.Lhs {
+				v, ok := e.(*ast.Ident)
+				if !ok {
+					return nil, errors.New("unsupported lexpr: %T", x.Lhs)
+				}
+
+				s.define(v.Name, ids[i])
+			}
 		case *ast.IfStmt:
 			s, err = c.compileIf(ctx, s, x)
 			if err != nil {
@@ -292,9 +301,15 @@ func (c *Front) compileIf(ctx context.Context, s *Scope, x *ast.IfStmt) (_ *Scop
 
 		then := newScope(thenLabel, s)
 
-		then, err = c.compileBlock(ctx, then, x.Then)
+		then, err = c.compileBlock(ctx, then, x.Body)
 		if err != nil {
 			return nil, errors.Wrap(err, "then")
+		}
+
+		if !then.deadend {
+			then.addcode(ir.B{
+				Label: endLabel,
+			})
 		}
 
 		s = newScope(endLabel, s, then)
@@ -319,13 +334,13 @@ func (c *Front) compileIf(ctx context.Context, s *Scope, x *ast.IfStmt) (_ *Scop
 		elseLabel = endLabel
 	}
 
-	s.expr(ir.B{
+	s.addcode(ir.B{
 		Label: elseLabel,
 	})
 
 	then := newScope(thenLabel, s)
 
-	then, err = c.compileBlock(ctx, then, x.Then)
+	then, err = c.compileBlock(ctx, then, x.Body)
 	if err != nil {
 		return nil, errors.Wrap(err, "then")
 	}
@@ -333,13 +348,13 @@ func (c *Front) compileIf(ctx context.Context, s *Scope, x *ast.IfStmt) (_ *Scop
 	els := s
 
 	if x.Else != nil {
-		then.expr(ir.B{
+		then.addcode(ir.B{
 			Label: endLabel,
 		})
 
 		els = newScope(elseLabel, s)
 
-		els, err = c.compileBlock(ctx, els, x.Else)
+		els, err = c.compileBlock(ctx, els, x.Else.(*ast.BlockStmt))
 		if err != nil {
 			return nil, errors.Wrap(err, "else")
 		}
@@ -423,10 +438,10 @@ func (c *Front) compileFor(ctx context.Context, s *Scope, x *ast.ForStmt) (_ *Sc
 
 func (c *Front) compileCond(ctx context.Context, s *Scope, e ast.Expr) (cc ir.Cond, id ir.Expr, err error) {
 	switch e := e.(type) {
-	case ast.BinOp:
-		switch e.Op {
+	case *ast.BinaryExpr:
+		switch op := e.Op.String(); op {
 		case "<", ">", "==", "!=", "<=", ">=":
-			cc = ir.Cond(e.Op)
+			cc = ir.Cond(op)
 		default:
 			return "", -1, errors.New("unsupported op: %q", e.Op)
 		}
@@ -441,32 +456,37 @@ func (c *Front) compileCond(ctx context.Context, s *Scope, e ast.Expr) (cc ir.Co
 
 func (c *Front) compileExpr(ctx context.Context, s *Scope, e ast.Expr) (id ir.Expr, err error) {
 	switch e := e.(type) {
-	case ast.Ident:
-		id = s.findVar(string(e), nil)
+	case *ast.Ident:
+		id = s.findVar(e.Name, nil)
 		if id < 0 {
 			return id, errors.New("undefined var: %s", e)
 		}
-	case ast.Number:
-		x, err := strconv.ParseUint(string(e), 10, 64)
-		if err != nil {
-			return -1, errors.Wrap(err, "")
-		}
+	case *ast.BasicLit:
+		switch e.Kind {
+		case token.INT:
+			x, err := strconv.ParseUint(e.Value, 10, 64)
+			if err != nil {
+				return -1, errors.Wrap(err, "")
+			}
 
-		id = s.expr(ir.Imm(x))
-	case ast.BinOp:
-		l, err := c.compileExpr(ctx, s, e.Left)
+			id = s.expr(ir.Imm(x))
+		default:
+			panic(e.Kind)
+		}
+	case *ast.BinaryExpr:
+		l, err := c.compileExpr(ctx, s, e.X)
 		if err != nil {
 			return -1, errors.Wrap(err, "op lhs")
 		}
 
-		r, err := c.compileExpr(ctx, s, e.Right)
+		r, err := c.compileExpr(ctx, s, e.Y)
 		if err != nil {
 			return -1, errors.Wrap(err, "op rhs")
 		}
 
 		var op any
 
-		switch e.Op {
+		switch e.Op.String() {
 		case "+":
 			op = ir.Add{
 				L: l,
@@ -492,8 +512,24 @@ func (c *Front) compileExpr(ctx context.Context, s *Scope, e ast.Expr) (id ir.Ex
 		}
 
 		id = s.expr(op)
+	case *ast.CallExpr:
+		n := e.Fun.(*ast.Ident)
+
+		x := ir.Call{
+			Func: n.Name,
+			In:   make([]ir.Expr, len(e.Args)),
+		}
+
+		for i, a := range e.Args {
+			x.In[i], err = c.compileExpr(ctx, s, a)
+			if err != nil {
+				return -1, errors.Wrap(err, "op lhs")
+			}
+		}
+
+		id = s.expr(x)
 	default:
-		panic(e)
+		panic(fmt.Sprintf("%T: %[1]v", e))
 	}
 
 	return
@@ -542,8 +578,8 @@ func (s *Scope) expr(x any) ir.Expr {
 }
 
 func (s *Scope) alloc(x any) ir.Expr {
-	id := ir.Expr(len(s.exprs))
-	s.exprs = append(s.exprs, x)
+	id := ir.Expr(len(s.Exprs))
+	s.Exprs = append(s.Exprs, x)
 
 	//	tlog.Printw("scope alloc", "l", s.Label, "name", tlog.None, "id", id, "typ", tlog.FormatNext("%T"), x, "x", x, "from", loc.Callers(1, 3))
 
@@ -628,17 +664,17 @@ func (s *Scope) addParent(par *Scope) {
 			continue
 		}
 
-		phi := s.exprs[id].(ir.Phi)
+		phi := s.Exprs[id].(ir.Phi)
 
 		phi = append(phi, alt)
 
-		s.exprs[id] = phi
+		s.Exprs[id] = phi
 	}
 }
 
 func (s *Scope) ret(ids ...ir.Expr) {
 	if len(ids) != len(s.global.ret) {
-		panic(len(ids))
+		panic(fmt.Sprintf("return %d  expected %d", len(ids), len(s.global.ret)))
 	}
 
 	s.deadend = true

@@ -1,3 +1,4 @@
+package main
 
 func main(argc int) (rc int) {
 	a = argc

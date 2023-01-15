@@ -5,6 +5,8 @@ type (
 		Path string
 
 		Funcs []*Func
+
+		Exprs []any
 	}
 
 	Func struct {
@@ -13,7 +15,7 @@ type (
 		In  []Param
 		Out []Param
 
-		Code []any
+		Code []Expr
 	}
 
 	Expr int

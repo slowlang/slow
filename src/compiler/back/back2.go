@@ -43,7 +43,7 @@ _start:
 	for _, f := range p.Funcs {
 		b = append(b, '\n')
 
-		b, err = c.compileFunc(ctx, a, b, f)
+		b, err = c.compileFunc(ctx, a, b, p, f)
 		if err != nil {
 			return nil, errors.Wrap(err, "func %v", f.Name)
 		}
@@ -52,7 +52,7 @@ _start:
 	return b, nil
 }
 
-func (c *Compiler) compileFunc(ctx context.Context, a Arch, b []byte, f *ir.Func) (_ []byte, err error) {
+func (c *Compiler) compileFunc(ctx context.Context, a Arch, b []byte, p *ir.Package, f *ir.Func) (_ []byte, err error) {
 	i2b := make([]int, len(f.Code))
 	l2i := make([]ir.Expr, 0, 10)
 	b2i := make([]ir.Expr, 0, 10)
@@ -74,7 +74,9 @@ func (c *Compiler) compileFunc(ctx context.Context, a Arch, b []byte, f *ir.Func
 	bb := 0
 	next := false
 
-	for id, x := range f.Code {
+	for _, id := range f.Code {
+		x := p.Exprs[id]
+
 		if l, ok := x.(ir.Label); ok || next {
 			bb++
 			next = false
@@ -96,7 +98,8 @@ func (c *Compiler) compileFunc(ctx context.Context, a Arch, b []byte, f *ir.Func
 
 	loop := make([]int, len(f.Code))
 
-	for id, x := range f.Code {
+	for _, id := range f.Code {
+		x := p.Exprs[id]
 		l := ir.Label(-1)
 
 		if br, ok := x.(ir.B); ok {
@@ -129,8 +132,9 @@ func (c *Compiler) compileFunc(ctx context.Context, a Arch, b []byte, f *ir.Func
 		for run := 0; run < 2; run++ {
 			d.Reset()
 
-			for id := ir.Expr(len(f.Code)) - 1; id >= 0; id-- {
-				x := f.Code[id]
+			for i := ir.Expr(len(f.Code)) - 1; i >= 0; i-- {
+				id := f.Code[i]
+				x := p.Exprs[id]
 
 				switch x := x.(type) {
 				case ir.B:
@@ -210,7 +214,9 @@ func (c *Compiler) compileFunc(ctx context.Context, a Arch, b []byte, f *ir.Func
 				}
 			}
 
-			for id, x := range f.Code {
+			for _, id := range f.Code {
+				x := p.Exprs[id]
+
 				d.Set(ir.Expr(id))
 
 				switch x := x.(type) {
@@ -267,8 +273,9 @@ func (c *Compiler) compileFunc(ctx context.Context, a Arch, b []byte, f *ir.Func
 	{ // phi
 		var d Set
 
-		for id := ir.Expr(len(f.Code)) - 1; id >= 0; id-- {
-			x := f.Code[id]
+		for i := ir.Expr(len(f.Code)) - 1; i >= 0; i-- {
+			id := f.Code[i]
+			x := p.Exprs[id]
 
 			switch x.(type) {
 			case ir.Label:
@@ -282,7 +289,8 @@ func (c *Compiler) compileFunc(ctx context.Context, a Arch, b []byte, f *ir.Func
 			slots[id] = d
 
 			for j := id + 1; int(j) < len(f.Code); j++ {
-				x := f.Code[j]
+				id := f.Code[j]
+				x := p.Exprs[id]
 
 				if _, ok := x.(ir.Phi); !ok {
 					break
@@ -333,7 +341,9 @@ func (c *Compiler) compileFunc(ctx context.Context, a Arch, b []byte, f *ir.Func
 		tlog.Printw("edges", "id", id, "x", d)
 	}
 
-	for id, x := range f.Code {
+	for _, id := range f.Code {
+		x := p.Exprs[id]
+
 		if phi, ok := x.(ir.Phi); ok {
 			tlog.Printw("phi", "id", id, "phi", phi)
 		}
@@ -344,7 +354,7 @@ func (c *Compiler) compileFunc(ctx context.Context, a Arch, b []byte, f *ir.Func
 		panic(clique)
 	}
 
-	color := c.colorGraph(edges, slots, f)
+	color := c.colorGraph(edges, slots, p, f)
 
 	regmap := make([]int, clique)
 
@@ -404,8 +414,8 @@ func (c *Compiler) compileFunc(ctx context.Context, a Arch, b []byte, f *ir.Func
 
 	phifix := map[int]map[int][][2]int{} // block-to -> block-from -> list of {DST, SRC regs}
 
-	for id, x := range f.Code {
-		id := ir.Expr(id)
+	for _, id := range f.Code {
+		x := p.Exprs[id]
 
 		phi, ok := x.(ir.Phi)
 		if !ok {
@@ -442,7 +452,9 @@ func (c *Compiler) compileFunc(ctx context.Context, a Arch, b []byte, f *ir.Func
 
 	tlog.Printw("compile func", "name", f.Name, "in", f.In, "out", f.Out)
 
-	for id, x := range f.Code {
+	for _, id := range f.Code {
+		x := p.Exprs[id]
+
 		var reg any = tlog.None
 		var col any = tlog.None
 
@@ -490,8 +502,8 @@ _%[1]v:
 
 `, f.Name)
 
-		for id, x := range f.Code {
-			id := ir.Expr(id)
+		for _, id := range f.Code {
+			x := p.Exprs[id]
 
 			switch x := x.(type) {
 			case ir.Arg:
@@ -549,7 +561,7 @@ _%[1]v:
 	return b, nil
 }
 
-func (c *Compiler) colorGraph(edges []Set, slots []Set, f *ir.Func) []int {
+func (c *Compiler) colorGraph(edges []Set, slots []Set, p *ir.Package, f *ir.Func) []int {
 	color := make([]int, len(f.Code))
 
 	for i := range color {
@@ -559,8 +571,8 @@ func (c *Compiler) colorGraph(edges []Set, slots []Set, f *ir.Func) []int {
 
 	phi := make([]Set, len(f.Code))
 
-	for id, x := range f.Code {
-		id := ir.Expr(id)
+	for _, id := range f.Code {
+		x := p.Exprs[id]
 
 		if p, ok := x.(ir.Phi); ok {
 			phi[id].Set(p...)
@@ -581,7 +593,9 @@ func (c *Compiler) colorGraph(edges []Set, slots []Set, f *ir.Func) []int {
 
 	q := make([]ir.Expr, 0, len(f.Code))
 
-	for id, x := range f.Code {
+	for _, id := range f.Code {
+		x := p.Exprs[id]
+
 		switch x.(type) {
 		case ir.Label, ir.B, ir.BCond:
 			continue
