@@ -280,11 +280,9 @@ func (c *Front) compileIf(ctx context.Context, s *Scope, x *ast.IfStmt) (_ *Scop
 		thenLabel := s.label()
 		endLabel := s.label()
 
-		cond = revCond(cond)
-
 		s.addcode(ir.BCond{
 			Expr:  condExpr,
-			Cond:  cond,
+			Cond:  revCond(cond),
 			Label: endLabel,
 		})
 
@@ -427,7 +425,7 @@ func (c *Front) compileCond(ctx context.Context, s *Scope, e ast.Expr) (cc ir.Co
 	switch e := e.(type) {
 	case ast.BinOp:
 		switch e.Op {
-		case "<", ">":
+		case "<", ">", "==", "!=", "<=", ">=":
 			cc = ir.Cond(e.Op)
 		default:
 			return "", -1, errors.New("unsupported op: %q", e.Op)
@@ -484,7 +482,7 @@ func (c *Front) compileExpr(ctx context.Context, s *Scope, e ast.Expr) (id ir.Ex
 				L: l,
 				R: r,
 			}
-		case "<", ">":
+		case "<", ">", "<=", ">=", "==", "!=":
 			op = ir.Cmp{
 				L: l,
 				R: r,

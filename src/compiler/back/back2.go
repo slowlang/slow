@@ -121,7 +121,7 @@ func (c *Compiler) compileFunc(ctx context.Context, a Arch, b []byte, f *ir.Func
 		var d Set
 
 		for _, p := range f.Out {
-			d.Add(p.Expr)
+			d.Set(p.Expr)
 		}
 
 		labelneed := make([]Set, len(l2i))
@@ -158,24 +158,24 @@ func (c *Compiler) compileFunc(ctx context.Context, a Arch, b []byte, f *ir.Func
 					labelneed[x] = d
 				case ir.Phi:
 					for _, xx := range x {
-						d.Add(xx)
+						d.Set(xx)
 					}
 				case ir.B:
 				case ir.BCond:
-					d.Add(x.Expr)
+					d.Set(x.Expr)
 				case ir.Cmp:
-					d.Add(x.L, x.R)
+					d.Set(x.L, x.R)
 				case ir.Add:
-					d.Add(x.L, x.R)
+					d.Set(x.L, x.R)
 				case ir.Sub:
-					d.Add(x.L, x.R)
+					d.Set(x.L, x.R)
 				case ir.Mul:
-					d.Add(x.L, x.R)
+					d.Set(x.L, x.R)
 				default:
 					panic(x)
 				}
 
-				d.Del(id)
+				d.Clear(id)
 			}
 		}
 
@@ -190,7 +190,7 @@ func (c *Compiler) compileFunc(ctx context.Context, a Arch, b []byte, f *ir.Func
 		var d Set
 
 		for _, p := range f.In {
-			d.Add(p.Expr)
+			d.Set(p.Expr)
 		}
 
 		labelhave := make([]Set, len(l2i))
@@ -211,7 +211,7 @@ func (c *Compiler) compileFunc(ctx context.Context, a Arch, b []byte, f *ir.Func
 			}
 
 			for id, x := range f.Code {
-				d.Add(ir.Expr(id))
+				d.Set(ir.Expr(id))
 
 				switch x := x.(type) {
 				case ir.Imm, ir.Arg:
@@ -225,7 +225,7 @@ func (c *Compiler) compileFunc(ctx context.Context, a Arch, b []byte, f *ir.Func
 				case ir.Phi:
 					for _, xx := range x {
 						check(xx)
-						d.Del(xx)
+						d.Clear(xx)
 					}
 				case ir.Cmp:
 					check(x.L, x.R)
@@ -272,15 +272,30 @@ func (c *Compiler) compileFunc(ctx context.Context, a Arch, b []byte, f *ir.Func
 
 			switch x.(type) {
 			case ir.Label:
-				slots[id] = d
-				d.Reset()
 			case ir.Phi:
-				d.Add(id)
+				d.Set(id)
+				continue
+			default:
+				continue
 			}
+
+			slots[id] = d
+
+			for j := id + 1; int(j) < len(f.Code); j++ {
+				x := f.Code[j]
+
+				if _, ok := x.(ir.Phi); !ok {
+					break
+				}
+
+				slots[j] = d
+			}
+
+			d.Reset()
 		}
 	}
 
-	graph := make([]Set, len(f.Code))
+	edges := make([]Set, len(f.Code))
 	clique := 0
 
 	for id := range f.Code {
@@ -288,30 +303,34 @@ func (c *Compiler) compileFunc(ctx context.Context, a Arch, b []byte, f *ir.Func
 			clique = s
 		}
 
-		slots[id].Range(func(x ir.Expr) {
-			slots[id].Range(func(y ir.Expr) {
+		slots[id].Range(func(x ir.Expr) bool {
+			slots[id].Range(func(y ir.Expr) bool {
 				if x == y {
-					return
+					return true
 				}
 
 				//	if _, ok := f.Code[x].(ir.Phi); ok {
 				//		return
 				//	}
 
-				graph[x].Add(y)
-				graph[y].Add(x)
+				edges[x].Set(y)
+				edges[y].Set(x)
+
+				return true
 			})
+
+			return true
 		})
 	}
 
 	tlog.Printw("graph", "clique", clique)
 
-	for id, d := range graph {
+	for id, d := range edges {
 		if d.Size() == 0 {
 			continue
 		}
 
-		tlog.Printw("graph", "id", id, "x", d)
+		tlog.Printw("edges", "id", id, "x", d)
 	}
 
 	for id, x := range f.Code {
@@ -320,35 +339,442 @@ func (c *Compiler) compileFunc(ctx context.Context, a Arch, b []byte, f *ir.Func
 		}
 	}
 
-	// TODO: spill if len(registers) < clique
+	if clique > 20 {
+		// TODO: spill if registers_count < clique
+		panic(clique)
+	}
+
+	color := c.colorGraph(edges, slots, f)
+
+	regmap := make([]int, clique)
+
+	regs := map[int]struct{}{}
+	cols := map[int]struct{}{}
+
+	for i := 0; i < clique; i++ {
+		regs[i] = struct{}{}
+		cols[i] = struct{}{}
+	}
+
+	for i, p := range f.In {
+		col := color[p.Expr]
+		regmap[col] = i
+
+		delete(regs, i)
+		delete(cols, col)
+	}
+
+	for i, p := range f.Out {
+		if _, ok := regs[i]; !ok {
+			continue
+		}
+
+		col := color[p.Expr]
+		if _, ok := cols[col]; !ok {
+			continue
+		}
+
+		regmap[col] = i
+
+		delete(regs, i)
+		delete(cols, col)
+	}
+
+	for i := range regs {
+		if _, ok := cols[i]; ok {
+			regmap[i] = i
+
+			delete(regs, i)
+			delete(cols, i)
+
+			continue
+		}
+
+		for col := range cols {
+			regmap[col] = i
+
+			delete(regs, i)
+			delete(cols, col)
+
+			break
+		}
+	}
+
+	tlog.Printw("regmap", "col2reg", regmap)
+
+	phifix := map[int]map[int][][2]int{} // block-to -> block-from -> list of {DST, SRC regs}
+
+	for id, x := range f.Code {
+		id := ir.Expr(id)
+
+		phi, ok := x.(ir.Phi)
+		if !ok {
+			continue
+		}
+
+		if color[id] < 0 {
+			color[id] = color[phi[0]]
+		}
+
+		colors := make([]int, len(phi))
+		for j, xx := range phi {
+			colors[j] = color[xx]
+		}
+
+		tlog.Printw("phi", "id", id, "phi", phi, "color", color[id], "others", colors)
+
+		for _, xx := range phi {
+			if color[id] != color[xx] {
+				to := i2b[id]
+				from := i2b[xx]
+
+				if phifix[to] == nil {
+					phifix[to] = map[int][][2]int{}
+				}
+
+				phifix[to][from] = append(phifix[to][from], [2]int{
+					regmap[color[id]],
+					regmap[color[xx]],
+				})
+			}
+		}
+	}
 
 	tlog.Printw("compile func", "name", f.Name, "in", f.In, "out", f.Out)
 
 	for id, x := range f.Code {
-		tlog.Printw("func code", "bb", i2b[id], "loop", loop[id], "id", id, "typ", tlog.FormatNext("%T"), x, "val", x, "slots", slots[id])
+		var reg any = tlog.None
+		var col any = tlog.None
+
+		switch x.(type) {
+		case ir.B, ir.BCond, ir.Label:
+		default:
+			c := color[id]
+			col = c
+
+			if c != -1 {
+				reg = regmap[c]
+			}
+		}
+
+		tlog.Printw("func code", "bb", i2b[id], "loop", loop[id], "id", id, "typ", tlog.FormatNext("%T"), x, "val", x, "reg", reg, "color", col, "slots", slots[id])
+	}
+
+	{ // codegen
+		reg := func(id ir.Expr) int {
+			col := color[id]
+			return regmap[col]
+		}
+
+		fixName := func(to, from int) string {
+			return fmt.Sprintf(".fix.%d.%d", to, from)
+		}
+
+		fixLabel := func(br ir.Expr, l ir.Label) string {
+			to := i2b[l2i[l]]
+			from := i2b[br]
+
+			if len(phifix[to][from]) == 0 {
+				return ""
+			}
+
+			return fixName(to, from)
+		}
+
+		b = fmt.Appendf(b, `
+.global _%v
+.align 4
+_%[1]v:
+	STP     FP, LR, [SP, #-16]!
+	MOV     FP, SP
+
+`, f.Name)
+
+		for id, x := range f.Code {
+			id := ir.Expr(id)
+
+			switch x := x.(type) {
+			case ir.Arg:
+				b = fmt.Appendf(b, "	// reg %d  arg %d  expr %d\n", reg(id), x, id)
+			case ir.Imm:
+				b = fmt.Appendf(b, "	MOV	X%d, #%d	// expr %d\n", reg(id), x, id)
+			case ir.Add:
+				b = fmt.Appendf(b, "	ADD	X%d, X%d, X%d	// expr %d\n", reg(id), reg(x.L), reg(x.R), id)
+			case ir.Sub:
+				b = fmt.Appendf(b, "	SUB	X%d, X%d, X%d	// expr %d\n", reg(id), reg(x.L), reg(x.R), id)
+			case ir.Mul:
+				b = fmt.Appendf(b, "	MUL	X%d, X%d, X%d	// expr %d\n", reg(id), reg(x.L), reg(x.R), id)
+			case ir.Cmp:
+				b = fmt.Appendf(b, "	CMP	X%d, X%d	// expr %d\n", reg(x.L), reg(x.R), id)
+			case ir.B:
+				fix := fixLabel(id, x.Label)
+
+				b = fmt.Appendf(b, "	B	L.%v%v\n", x.Label, fix)
+			case ir.BCond:
+				fix := fixLabel(id, x.Label)
+
+				b = fmt.Appendf(b, "	B.%v	L.%v%v\n", cond2asm(x.Cond), x.Label, fix)
+			case ir.Label:
+				for from, list := range phifix[i2b[id]] {
+					fix := fixName(i2b[id], from)
+
+					b = fmt.Appendf(b, "L.%v%v:\n", x, fix)
+
+					b = dephi(b, list)
+
+					b = fmt.Appendf(b, "	B	L.%v\n", x)
+				}
+
+				b = fmt.Appendf(b, "L.%v:\n", x)
+			case ir.Phi:
+			default:
+				panic(x)
+			}
+		}
+
+		for i, p := range f.Out {
+			if reg(p.Expr) != i {
+				b = fmt.Appendf(b, "	MOV	X%d, X%d	// res %d  expr %d\n", i, reg(p.Expr), i, p.Expr)
+			} else {
+				b = fmt.Appendf(b, "	// reg %d  res %d  expr %d\n", reg(p.Expr), i, p.Expr)
+			}
+		}
+
+		b = fmt.Appendf(b, `
+	LDP     FP, LR, [SP], #16
+	RET
+`)
 	}
 
 	return b, nil
 }
 
-func (d *Set) Add(ids ...ir.Expr) {
+func (c *Compiler) colorGraph(edges []Set, slots []Set, f *ir.Func) []int {
+	color := make([]int, len(f.Code))
+
+	for i := range color {
+		color[i] = -1
+
+	}
+
+	phi := make([]Set, len(f.Code))
+
+	for id, x := range f.Code {
+		id := ir.Expr(id)
+
+		if p, ok := x.(ir.Phi); ok {
+			phi[id].Set(p...)
+
+			for _, p := range p {
+				phi[p].Set(id)
+			}
+		}
+	}
+
+	max := 0
+
+	for _, d := range slots {
+		if s := d.Size(); s > max {
+			max = s
+		}
+	}
+
+	q := make([]ir.Expr, 0, len(f.Code))
+
+	for id, x := range f.Code {
+		switch x.(type) {
+		case ir.Label, ir.B, ir.BCond:
+			continue
+		default:
+		}
+
+		q = append(q, ir.Expr(id))
+	}
+
+	l := make([]int, len(q))
+	l[0] = len(q)
+
+	sortRange := func(v ir.Expr, s, e int) {
+		//	tlog.Printw("sort range", "v", v, "s", s, "e", e, "of", len(q), "edges", edges[v])
+		d := edges[v]
+		i := s
+		j := e
+
+		for i != j {
+			//	tlog.Printw("loop", "i", i, "j", j, "L", d.IsSet(q[i]), "R", d.IsSet(q[j-1]), "q", q[i:j])
+			if d.IsSet(q[i]) {
+				i++
+			} else if !d.IsSet(q[j-1]) {
+				j--
+			} else {
+				q[i], q[j-1] = q[j-1], q[i]
+				i++
+				j--
+			}
+		}
+
+		if i-s != 0 {
+			l[s] = i - s
+		}
+
+		if e-i != 0 {
+			l[i] = e - i
+		}
+	}
+
+	assignable := func(id ir.Expr, col int) bool {
+		ok := true
+
+		edges[id].Range(func(xx ir.Expr) bool {
+			if color[xx] == col {
+				ok = false
+			}
+
+			return ok
+		})
+
+		return ok
+	}
+
+	assign := func(id ir.Expr, col int) {
+		if col < 0 {
+			panic(id)
+		}
+
+		if color[id] >= 0 {
+			panic(id)
+		}
+
+		color[id] = col
+	}
+
+	var walk func(ir.Expr, *Set) Set
+	walk = func(id ir.Expr, visited *Set) (r Set) {
+		if visited.IsSet(id) {
+			return
+		}
+
+		visited.Set(id)
+
+		c := color[id]
+		tlog.V("walk").Printw("walk", "id", id, "c", c, "neighbours", phi[id])
+		if c != -1 {
+			r.Set(ir.Expr(c))
+			return
+		}
+
+		phi[id].Range(func(x ir.Expr) bool {
+			sub := walk(x, visited)
+			r.Or(sub)
+
+			return true
+		})
+
+		return
+	}
+
+	i := 0
+	for i < len(q) {
+		if tlog.If("state") {
+			var args []any
+			for j := i; j < len(q); j += l[j] {
+				args = append(args, fmt.Sprintf("%d", j), q[j:j+l[j]])
+			}
+
+			tlog.Printw("state", args...)
+		}
+
+		col := 0
+		var cols Set
+
+		for col < max {
+			if assignable(q[i], col) {
+				cols.Set(ir.Expr(col))
+			}
+
+			col++
+		}
+
+		col = int(cols.First())
+
+		var walked Set
+		if p := phi[q[i]]; p.Size() != 0 {
+			walked = walk(q[i], new(Set))
+			if f := walked.AndCp(cols).First(); f != -1 {
+				col = int(f)
+			}
+		}
+
+		tlog.Printw("color", "id", q[i], "color", col, "colors", cols, "phi", phi[q[i]], "walk", walked)
+
+		assign(q[i], col)
+
+		if l[i] != 1 {
+			l[i+1] = l[i] - 1
+		}
+
+		l[i] = 1
+		i++
+
+		o := 7
+		for j := i; j < len(q) && o > 0; o-- {
+			tlog.V("sort_range").Printw("sort range", "s", j, "e", j+l[j], "edges", edges[q[i-1]])
+
+			e := j + l[j]
+
+			if j-e != 1 {
+				sortRange(q[i-1], j, e)
+			}
+
+			j = e
+		}
+	}
+
+	return color
+}
+
+func (d *Set) Set(ids ...ir.Expr) *Set {
 	for _, id := range ids {
 		*d |= 1 << id
 	}
+
+	return d
 }
 
-func (d *Set) Del(ids ...ir.Expr) {
+func (d *Set) Clear(ids ...ir.Expr) *Set {
 	for _, id := range ids {
 		*d &^= 1 << id
 	}
+
+	return d
 }
 
-func (d *Set) Or(x Set) {
+func (d *Set) Or(x Set) *Set {
 	*d |= x
+
+	return d
 }
 
-func (d *Set) And(x Set) {
+func (d *Set) And(x Set) *Set {
 	*d &= x
+
+	return d
+}
+
+func (d Set) OrCp(x Set) Set {
+	return d & x
+}
+
+func (d Set) AndCp(x Set) Set {
+	return d & x
+}
+
+func (d Set) AndNotCp(x Set) Set {
+	return d &^ x
+}
+
+func (d Set) XorCp(x Set) Set {
+	return d ^ x
 }
 
 func (d *Set) Reset() {
@@ -363,12 +789,28 @@ func (d Set) IsSet(id ir.Expr) bool {
 	return d&(1<<id) != 0
 }
 
-func (d Set) Range(f func(id ir.Expr)) {
+func (d Set) Range(f func(id ir.Expr) bool) {
 	for i := 0; i < 64; i++ {
-		if d&(1<<i) != 0 {
-			f(ir.Expr(i))
+		if d&(1<<i) == 0 {
+			continue
+		}
+
+		if !f(ir.Expr(i)) {
+			break
 		}
 	}
+}
+
+func (d Set) First() ir.Expr {
+	for i := 0; i < 64; i++ {
+		if d&(1<<i) == 0 {
+			continue
+		}
+
+		return ir.Expr(i)
+	}
+
+	return -1
 }
 
 func (d Set) TlogAppend(b []byte) []byte {
@@ -387,4 +829,59 @@ func (d Set) TlogAppend(b []byte) []byte {
 	b = (tlwire.LowEncoder{}).AppendSpecial(b, tlwire.Break)
 
 	return b
+}
+
+func dephi(b []byte, l [][2]int) []byte {
+	b = fmt.Appendf(b, "	// swap %v\n", l)
+
+next:
+	for i := 0; i < len(l); i++ {
+		for j := i + 1; j < len(l); j++ {
+			if l[i][0] != l[j][1] {
+				continue
+			}
+
+			b = swap(b, l[i][0], l[j][0])
+			l[j][1], l[i][1] = l[i][1], l[j][1]
+
+			continue next
+		}
+
+		p := l[i]
+
+		if p[0] == p[1] {
+			continue
+		}
+
+		b = fmt.Appendf(b, "	MOV	X%d, X%d\n", p[0], p[1])
+	}
+
+	return b
+}
+
+func swap(b []byte, x, y int) []byte {
+	b = fmt.Appendf(b, "	// swap X%d, X%d\n", x, y)
+	b = fmt.Appendf(b, "	EOR	X%d, X%d, X%d\n", x, x, y)
+	b = fmt.Appendf(b, "	EOR	X%d, X%d, X%d\n", y, x, y)
+	b = fmt.Appendf(b, "	EOR	X%d, X%d, X%d\n", x, x, y)
+	return b
+}
+
+func cond2asm(cond ir.Cond) string {
+	switch cond {
+	case "<":
+		return "LT"
+	case ">":
+		return "GT"
+	case "<=":
+		return "LE"
+	case ">=":
+		return "GE"
+	case "==":
+		return "EQ"
+	case "!=":
+		return "NE"
+	default:
+		panic(cond)
+	}
 }

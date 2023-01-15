@@ -1,0 +1,19 @@
+
+func main() (rc int) {
+	a = 1
+
+	if a == a {
+		b = a + a
+		c = a + 1
+		d = b + 1
+		rc = c
+		g = d
+	} else {
+		e = 1
+		f = a + 1
+		rc = e
+		g = f
+	}
+
+	return g
+}
