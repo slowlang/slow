@@ -81,13 +81,12 @@ func (c *Compiler) compileFunc(ctx context.Context, b []byte, cc *Context, f *ir
 
 	p := cc.p
 
-	base := f.Code[0]
 	funcNum := 0
 	for p.Funcs[funcNum] != f {
 		funcNum++
 	}
 
-	i2b := make([]int, len(f.Code))
+	i2b := make(map[ir.Expr]int, len(f.Code))
 	l2i := make([]ir.Expr, 0, 10)
 	b2i := make([]ir.Expr, 0, 10)
 
@@ -130,29 +129,29 @@ func (c *Compiler) compileFunc(ctx context.Context, b []byte, cc *Context, f *ir
 		}
 	}
 
-	loop := make([]int, len(f.Code))
+	loop := make(map[ir.Expr]int, len(f.Code))
 
 	for _, id := range f.Code {
 		x := p.Exprs[id]
 		l := ir.Label(-1)
 
-		if br, ok := x.(ir.B); ok {
-			l = br.Label
-		}
-		if br, ok := x.(ir.BCond); ok {
-			l = br.Label
+		switch x := x.(type) {
+		case ir.B:
+			l = x.Label
+		case ir.BCond:
+			l = x.Label
 		}
 
 		if l < 0 {
 			continue
 		}
 
-		for j := l2i[l]; j <= ir.Expr(id); j++ {
-			loop[j]++
+		for j := l2i[l]; j <= id; j++ {
+			loop[j-base]++
 		}
 	}
 
-	slots := make([]Set, len(f.Code))
+	slots := make(map[ir.Expr]Set, len(f.Code))
 
 	if true { // backward
 		var d Set
@@ -348,7 +347,7 @@ func (c *Compiler) compileFunc(ctx context.Context, b []byte, cc *Context, f *ir
 		}
 	}
 
-	edges := make([]Set, len(f.Code))
+	edges := make(map[ir.Expr]Set, len(f.Code))
 	clique := 0
 
 	for _, id := range f.Code {
@@ -379,11 +378,13 @@ func (c *Compiler) compileFunc(ctx context.Context, b []byte, cc *Context, f *ir
 	tlog.Printw("graph", "clique", clique)
 
 	for id, d := range edges {
+		id := ir.Expr(id)
+
 		if d.Size() == 0 {
 			continue
 		}
 
-		tlog.Printw("edges", "id", id, "x", d)
+		tlog.Printw("edges", "id", id+base, "x", d)
 	}
 
 	for _, id := range f.Code {
@@ -494,6 +495,8 @@ func (c *Compiler) compileFunc(ctx context.Context, b []byte, cc *Context, f *ir
 			}
 		}
 	}
+
+	tlog.Printw("func codegen", "name", f.Name, "in", f.In, "out", f.Out)
 
 	for _, id := range f.Code {
 		x := p.Exprs[id]
@@ -639,16 +642,32 @@ func (c *Compiler) prepareFunc(ctx context.Context, cc *Context, f *ir.Func) (er
 		return
 	}
 
-	insert := func(i int, x any) {
+	insert := func(i int, xxx ...any) {
+		f.Code = append(f.Code, make([]ir.Expr, len(xxx))...)
+		copy(f.Code[i+len(xxx):], f.Code[i:])
+
 		ee := cc.p.Exprs
 
-		id := ir.Expr(len(ee))
+		for j, x := range xxx {
+			id := ir.Expr(len(ee))
+			ee = append(ee, x)
 
-		ee = append(ee, x)
-		copy(ee[i+1:], ee[i:])
-		ee[i] = id
+			f.Code[i+j] = id
+		}
 
 		cc.p.Exprs = ee
+	}
+
+	var label ir.Label
+
+	for _, id := range f.Code {
+		x := cc.p.Exprs[id]
+
+		if l, ok := x.(ir.Label); ok {
+			if l+1 > label {
+				label = l + 1
+			}
+		}
 	}
 
 	for i := 0; i < len(f.Code); i++ {
@@ -666,7 +685,27 @@ func (c *Compiler) prepareFunc(ctx context.Context, cc *Context, f *ir.Func) (er
 				insert(i, ir.B{Label: x})
 			}
 		case ir.Call:
+			l := []any{
+				ir.B{Label: label},
+				label,
+			}
+
+			insert(i, l...)
+
+			label++
+
+			i += len(l)
 		default:
+		}
+	}
+
+	if tlog.If("prepared") {
+		tlog.Printw("func prepared", "name", f.Name, "in", f.In, "out", f.Out)
+
+		for _, id := range f.Code {
+			x := cc.p.Exprs[id]
+
+			tlog.Printw("func code", "id", id, "typ", tlog.FormatNext("%T"), x, "val", x)
 		}
 	}
 
@@ -679,7 +718,6 @@ func (c *Compiler) colorGraph(edges []Set, slots []Set, p *ir.Package, f *ir.Fun
 
 	for i := range color {
 		color[i] = -1
-
 	}
 
 	phi := make([]Set, len(f.Code))
@@ -724,7 +762,7 @@ func (c *Compiler) colorGraph(edges []Set, slots []Set, p *ir.Package, f *ir.Fun
 	findV := func(i int) ir.Expr {
 		for j := i; j < i+l[i]; j++ {
 			id := q[j]
-			if color[id] == -1 {
+			if color[id-base] == -1 {
 				continue
 			}
 
@@ -815,6 +853,64 @@ func (c *Compiler) colorGraph(edges []Set, slots []Set, p *ir.Package, f *ir.Fun
 		return
 	}
 
+	if !tlog.If("noprealloc") { // prealloc
+		for _, id := range f.Code {
+			x := p.Exprs[id]
+
+			switch x := x.(type) {
+			case ir.Arg:
+				col := int(x)
+
+				tlog.Printw("arg prealloc", "id", id, "col", col, "base", base)
+
+				if !assignable(id, col) {
+					panic(x)
+				}
+
+				assign(id, col)
+			}
+		}
+
+		for i, p := range f.Out {
+			id := p.Expr
+			col := i
+
+			if !assignable(id, col) {
+				panic(p)
+			}
+
+			assign(id, col)
+		}
+
+		{ // sort
+			s := 0
+			e := len(q)
+			i := s
+			j := e
+
+			for i != j {
+				//	tlog.Printw("loop", "i", i, "j", j, "L", d.IsSet(q[i]), "R", d.IsSet(q[j-1]), "q", q[i:j])
+				if color[q[i]-base] != -1 {
+					i++
+				} else if color[q[j-1]-base] == -1 {
+					j--
+				} else {
+					q[i], q[j-1] = q[j-1], q[i]
+					i++
+					j--
+				}
+			}
+
+			if i-s != 0 {
+				l[s] = i - s
+			}
+
+			if e-i != 0 {
+				l[i] = e - i
+			}
+		}
+	}
+
 	i := 0
 	for i < len(q) {
 		if tlog.If("state") {
@@ -828,30 +924,34 @@ func (c *Compiler) colorGraph(edges []Set, slots []Set, p *ir.Package, f *ir.Fun
 
 		id := findV(i)
 
-		col := 0
-		var cols Set
+		if color[id-base] == -1 {
+			col := 0
+			var cols Set
 
-		for col < max {
-			if assignable(id, col) {
-				cols.Set(ir.Expr(col))
+			for col < max {
+				if assignable(id, col) {
+					cols.Set(ir.Expr(col))
+				}
+
+				col++
 			}
 
-			col++
-		}
+			col = int(cols.First())
 
-		col = int(cols.First())
-
-		var walked Set
-		if p := phi[id-base]; p.Size() != 0 {
-			walked = walk(id, new(Set))
-			if f := walked.AndCp(cols).First(); f != -1 {
-				col = int(f)
+			var walked Set
+			if p := phi[id-base]; p.Size() != 0 {
+				walked = walk(id, new(Set))
+				if f := walked.AndCp(cols).First(); f != -1 {
+					col = int(f)
+				}
 			}
+
+			tlog.Printw("color", "id", id, "color", col, "colors", cols, "phi", phi[id-base], "walk", walked)
+
+			assign(id, col)
+		} else {
+			tlog.Printw("color (preset)", "id", id, "color", color[id-base], "phi", phi[id-base])
 		}
-
-		tlog.Printw("color", "id", id, "color", col, "colors", cols, "phi", phi[id-base], "walk", walked)
-
-		assign(id, col)
 
 		if l[i] != 1 {
 			l[i+1] = l[i] - 1

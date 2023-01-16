@@ -44,7 +44,7 @@ func (c *Front) Compile(ctx context.Context) (p *ir.Package, err error) {
 	p = &ir.Package{}
 
 	for _, f := range c.files {
-		tlog.Printw("file", "f", f)
+		//	tlog.Printw("file", "f", f)
 
 		for _, d := range f.Decls {
 			err = c.compileDecl(ctx, p, d)

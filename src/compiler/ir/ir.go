@@ -67,6 +67,8 @@ type (
 	}
 
 	Phi []Expr
+
+	Nop struct{}
 )
 
 type (
