@@ -6,8 +6,8 @@ import (
 
 	"github.com/nikandfor/errors"
 	"github.com/nikandfor/tlog"
-	"github.com/nikandfor/tlog/tlwire"
 
+	"github.com/slowlang/slow/src/compiler/bitmap"
 	"github.com/slowlang/slow/src/compiler/ir"
 )
 
@@ -25,7 +25,7 @@ type (
 		q    []ir.BlockID
 		code []any
 
-		users Bitmap
+		users bitmap.Big
 
 		//	lab     Label
 	}
@@ -35,13 +35,8 @@ type (
 		Used   int
 		Outs   int `tlog:",hex"`
 
-		Users Bitmap
-		Uses  Bitmap
-	}
-
-	Bitmap struct {
-		b  []uint64
-		b0 [1]uint64
+		Users bitmap.Big
+		Uses  bitmap.Big
 	}
 
 	Label int
@@ -68,8 +63,6 @@ func (c *Compiler) CompilePackage(ctx context.Context, a Arch, b []byte, pkg *ir
 
 		//	q: make([]ir.BlockID, 0, len(p.Blocks)),
 		s: make([]stats, len(pkg.Blocks)),
-
-		//	visited: NewBitmap(),
 	}
 
 	tlog.Printw("package", "path", pkg.Path)
@@ -325,143 +318,6 @@ func (p *pkgContext) label() Label {
 	return l
 }
 */
-
-func NewBitmap() *Bitmap {
-	s := MakeBitmap()
-	return &s
-}
-
-func MakeBitmap() Bitmap {
-	s := Bitmap{}
-	s.b = s.b0[:]
-
-	return s
-}
-
-func (s *Bitmap) Set(i int) {
-	i, j := s.ij(i)
-
-	s.grow(i)
-
-	s.b[i] |= 1 << j
-}
-
-func (s Bitmap) Clear(i int) {
-	i, j := s.ij(i)
-
-	if i >= len(s.b) {
-		return
-	}
-
-	s.b[i] &^= 1 << j
-}
-
-func (s Bitmap) IsSet(i int) bool {
-	i, j := s.ij(i)
-
-	if i >= len(s.b) {
-		return false
-	}
-
-	return (s.b[i] & (1 << j)) != 0
-}
-
-func (s *Bitmap) Or(x Bitmap) {
-	s.grow(len(x.b))
-
-	for i, x := range x.b {
-		s.b[i] |= x
-	}
-}
-
-func (s Bitmap) And(x Bitmap) {
-	for i, x := range x.b {
-		if i == len(s.b) {
-			break
-		}
-
-		s.b[i] &= x
-	}
-}
-
-func (s Bitmap) AndNot(x Bitmap) {
-	for i, x := range x.b {
-		if i == len(s.b) {
-			break
-		}
-
-		s.b[i] &^= x
-	}
-}
-
-func (s Bitmap) AndNotCp(x Bitmap) Bitmap {
-	cp := s.Copy()
-	cp.AndNot(x)
-
-	return cp
-}
-
-func (s Bitmap) Copy() Bitmap {
-	r := MakeBitmap()
-	r.Or(s)
-	return r
-}
-
-func (s Bitmap) CopyPtr() *Bitmap {
-	r := NewBitmap()
-	r.Or(s)
-	return r
-}
-
-func (s Bitmap) Reset() {
-	for i := range s.b {
-		s.b[i] = 0
-	}
-}
-
-func (s Bitmap) Range(f func(i int) bool) {
-	for i, x := range s.b {
-		if x == 0 {
-			continue
-		}
-
-		for j := 0; j < 64; j++ {
-			if (x & (1 << j)) == 0 {
-				continue
-			}
-
-			if !f(i*64 + j) {
-				return
-			}
-		}
-	}
-}
-
-func (s Bitmap) TlogAppend(b []byte) []byte {
-	var e tlwire.LowEncoder
-
-	b = e.AppendTag(b, tlwire.Array, -1)
-
-	s.Range(func(i int) bool {
-		b = e.AppendInt(b, i)
-
-		return true
-	})
-
-	b = e.AppendBreak(b)
-
-	return b
-}
-
-func (s Bitmap) ij(pos int) (i int, j int) {
-	return pos / 64, pos % 64
-}
-
-func (s *Bitmap) grow(i int) {
-	for i >= len(s.b) {
-		s.b = append(s.b, 0)
-	}
-}
 
 func cond2asm(cond ir.Cond) string {
 	switch cond {

@@ -11,6 +11,7 @@ import (
 	"github.com/nikandfor/errors"
 	"github.com/nikandfor/loc"
 	"github.com/nikandfor/tlog"
+
 	"github.com/slowlang/slow/src/compiler/ir"
 )
 
@@ -31,14 +32,17 @@ type (
 
 		def  map[string]int
 		vars map[int]ir.Link
-		out  map[string]ir.Link
+		out  map[int]ir.Link
 
-		//	parent *Scope
-		prev []*Scope
+		varcb func(def int) ir.Link
 
-		//	child *Scope
+		depth int
+		prev  []*Scope
+
 		from loc.PC
 	}
+
+	scopeList []*Scope
 )
 
 func (c *Front) Compile(ctx context.Context) (_ *ir.Package, err error) {
@@ -50,8 +54,8 @@ func (c *Front) Compile(ctx context.Context) (_ *ir.Package, err error) {
 	p.zero = p.addlink(ir.Zero{})
 	p.Self = p.add(p.Package)
 
-	s := newScope(p.Self, &Scope{pkgContext: p})
-	s.parent = nil
+	s := newScope(p.Self, 0)
+	s.pkgContext = p
 
 	for _, f := range c.files {
 		for _, d := range f.Decls {
@@ -97,12 +101,10 @@ func (c *Front) compileFunc(ctx context.Context, par *Scope, fn *ast.FuncDecl) (
 
 	tlog.Printw("compile func", "name", f.Name)
 
-	fs := newScope(fid, par)
-	fs.f = f
+	s := newScope(fid, 1, par)
+	s.f = f
 
-	s := newScope(ir.Nowhere.Block, fs)
-
-	f.Args = fs.add(ir.Args{})
+	f.Args = s.add(ir.Args{})
 	args := 0
 
 	for _, p := range fn.Type.Params.List {
@@ -114,7 +116,7 @@ func (c *Front) compileFunc(ctx context.Context, par *Scope, fn *ast.FuncDecl) (
 		}
 
 		for _, name := range p.Names {
-			fs.define(name.Name, ir.Link{Block: f.Args, Out: args})
+			s.define(name.Name, ir.Link{Block: f.Args, Out: args})
 			args++
 			//	f.Args = append(f.Args, 0)
 		}
@@ -127,7 +129,7 @@ func (c *Front) compileFunc(ctx context.Context, par *Scope, fn *ast.FuncDecl) (
 		}
 
 		for _, name := range p.Names {
-			fs.define(name.Name, s.zero)
+			s.define(name.Name, s.zero)
 			f.Results = append(f.Results, ir.Nowhere)
 		}
 	}
@@ -151,15 +153,11 @@ func (c *Front) compileFunc(ctx context.Context, par *Scope, fn *ast.FuncDecl) (
 
 		done[s] = struct{}{}
 
-		pr(s.parent)
-
 		for _, p := range s.prev {
 			pr(p)
 		}
 
-		tlog.Printw("scope", "p", s.ptr(), "par", s.parentPtr(), "prev", s.prevPtr(), "out", s.out, "vars", s.vars, "id", s.id, "from", tlog.FormatNext("%x"), s.from)
-
-		pr(s.child)
+		tlog.Printw("scope", "p", s.ptr(), "prev", s.prevPtr(), "id", s.id, "d", s.depth, "out", s.out, "def", s.def, "vars", s.vars, "from", tlog.FormatNext("%x"), s.from)
 	}
 
 	pr(end)
@@ -214,7 +212,11 @@ func (c *Front) compileStmt(ctx context.Context, s *Scope, x ast.Stmt) (_ *Scope
 				return nil, errors.New("unsupported lexpr: %T", x.Lhs)
 			}
 
-			s.assign(v.Name, ids[i])
+			if x.Tok == token.DEFINE {
+				s.define(v.Name, ids[i])
+			} else {
+				s.assign(v.Name, s.depth, ids[i])
+			}
 		}
 	case *ast.IfStmt:
 		s, err = c.compileIf(ctx, s, x)
@@ -236,12 +238,12 @@ func (c *Front) compileStmt(ctx context.Context, s *Scope, x ast.Stmt) (_ *Scope
 func (c *Front) compileIf(ctx context.Context, s *Scope, x *ast.IfStmt) (_ *Scope, err error) {
 	b := &ir.Switch{}
 	id := s.add(b)
-	common := newScope(id, s.parent, s)
+	prev := s
 
 	var branches []*Scope
 
 	for {
-		cond, condExpr, err := c.compileCond(ctx, common, x.Cond)
+		cond, condExpr, err := c.compileCond(ctx, prev, x.Cond)
 		if err != nil {
 			return nil, errors.Wrap(err, "if cond")
 		}
@@ -251,8 +253,8 @@ func (c *Front) compileIf(ctx context.Context, s *Scope, x *ast.IfStmt) (_ *Scop
 			Cond: cond,
 		})
 
-		tup := common.add(ir.Tuple{})
-		sub := newScope(tup, common)
+		tup := prev.add(ir.Tuple{})
+		sub := newScope(tup, 1, prev)
 
 		sub, err = c.compileBlock(ctx, sub, x.Body)
 		if err != nil {
@@ -264,8 +266,8 @@ func (c *Front) compileIf(ctx context.Context, s *Scope, x *ast.IfStmt) (_ *Scop
 
 		switch xx := x.Else.(type) {
 		case *ast.BlockStmt:
-			tup := common.add(ir.Tuple{})
-			sub := newScope(tup, common)
+			tup := prev.add(ir.Tuple{})
+			sub := newScope(tup, 1, prev)
 
 			sub, err = c.compileBlock(ctx, sub, xx)
 			if err != nil {
@@ -278,8 +280,8 @@ func (c *Front) compileIf(ctx context.Context, s *Scope, x *ast.IfStmt) (_ *Scop
 			x = xx
 			continue
 		case nil:
-			tup := common.add(ir.Tuple{})
-			sub := newScope(tup, common)
+			tup := prev.add(ir.Tuple{})
+			sub := newScope(tup, 1, prev)
 
 			b.Blocks = append(b.Blocks, tup)
 			branches = append(branches, sub)
@@ -290,16 +292,42 @@ func (c *Front) compileIf(ctx context.Context, s *Scope, x *ast.IfStmt) (_ *Scop
 		break
 	}
 
-	s = newScope(id, s.parent, branches...)
+	s = newScope(id, -1, branches...)
 
-	return s, nil
+	s.varcb = func(def int) ir.Link {
+		var out int
+
+		for _, sub := range branches {
+			res := sub.findVar(def, s)
+			if res == ir.Nowhere {
+				panic(def)
+			}
+
+			tup := s.Blocks[sub.id].(ir.Tuple)
+			out = len(tup)
+			tup = append(tup, res)
+			s.Blocks[sub.id] = tup
+		}
+
+		return ir.Link{
+			Block: id,
+			Out:   out,
+		}
+	}
+
+	next := newScope(-1, 0, s)
+
+	return next, nil
 }
 
 func (c *Front) compileFor(ctx context.Context, s *Scope, x *ast.ForStmt) (_ *Scope, err error) {
 	b := &ir.Loop{}
 	id := s.add(b)
 
-	s = newScope(-1, s.parent, s)
+	prev := s
+
+	b.Body = s.add(ir.Tuple{})
+	s = newScope(b.Body, 1, s)
 
 	if x.Cond != nil {
 		cond, condExpr, err := c.compileCond(ctx, s, x.Cond)
@@ -313,17 +341,45 @@ func (c *Front) compileFor(ctx context.Context, s *Scope, x *ast.ForStmt) (_ *Sc
 		}
 	}
 
-	b.Body = s.add(ir.Tuple{})
-	s = newScope(b.Body, s.parent, s)
-
 	s, err = c.compileBlock(ctx, s, x.Body)
 	if err != nil {
 		return nil, errors.Wrap(err, "body")
 	}
 
-	s = newScope(id, s.parent, s)
+	s = newScope(id, -1, s)
 
-	return s, nil
+	for def, id := range prev.out {
+		res := s.findVar(def, s)
+		if id == res {
+			continue
+		}
+
+		b.LoopIn = append(b.LoopIn, id)
+		b.LoopOut = append(b.LoopOut, res)
+	}
+
+	tlog.Printw("loop", "prev.out", prev.out, "body.out", s.out, "body.vars", s.vars)
+
+	s.varcb = func(def int) ir.Link {
+		res := s.findVar(def, s)
+		if res == ir.Nowhere {
+			panic(def)
+		}
+
+		tup := s.Blocks[b.Body].(ir.Tuple)
+		out := len(tup)
+		tup = append(tup, res)
+		s.Blocks[b.Body] = tup
+
+		return ir.Link{
+			Block: id,
+			Out:   out,
+		}
+	}
+
+	next := newScope(-1, 0, s)
+
+	return next, nil
 }
 
 func (c *Front) compileCond(ctx context.Context, s *Scope, e ast.Expr) (cc ir.Cond, id ir.Link, err error) {
@@ -347,7 +403,7 @@ func (c *Front) compileCond(ctx context.Context, s *Scope, e ast.Expr) (cc ir.Co
 func (c *Front) compileExpr(ctx context.Context, s *Scope, e ast.Expr) (id ir.Link, err error) {
 	switch e := e.(type) {
 	case *ast.Ident:
-		id = s.findVar(e.Name, nil)
+		id = s.findValue(e.Name, s.depth)
 		if id == ir.Nowhere {
 			return id, errors.New("undefined var: %s", e)
 		}
@@ -425,33 +481,23 @@ func (c *Front) compileExpr(ctx context.Context, s *Scope, e ast.Expr) (id ir.Li
 	return
 }
 
-func newScope(id ir.BlockID, par *Scope, prev ...*Scope) *Scope {
+func newScope(id ir.BlockID, d int, prev ...*Scope) *Scope {
 	s := &Scope{
-		id:     id,
-		out:    map[string]ir.Link{},
-		vars:   map[string]ir.Link{},
-		parent: par,
-		prev:   prev,
-		from:   loc.Caller(1),
+		id:    id,
+		def:   map[string]int{},
+		vars:  map[int]ir.Link{},
+		out:   map[int]ir.Link{},
+		depth: d,
+		prev:  prev,
+		from:  loc.Caller(1),
 	}
 
-	if par != nil {
-		s.pkgContext = par.pkgContext
-		par.child = s
+	if prev != nil {
+		s.depth += prev[0].depth
+		s.pkgContext = prev[0].pkgContext
 	}
 
-	var x any
-
-	if s.pkgContext != nil && id != -1 {
-		x = s.Blocks[id]
-	}
-
-	l := make([]ir.BlockID, len(prev))
-	for i, p := range prev {
-		l[i] = p.sid()
-	}
-
-	tlog.Printw("new scope", "scope", id, "par", par.sid(), "prev", l, "typ", tlog.NextType, x, "from", loc.Callers(1, 3))
+	tlog.Printw("new scope", "scope", s.ptr(), "prev", s.prevPtr(), "from", loc.Callers(1, 3))
 
 	return s
 }
@@ -466,14 +512,6 @@ func (s *Scope) sid() ir.BlockID {
 
 func (s *Scope) ptr() uintptr {
 	return uintptr(unsafe.Pointer(s)) & 0xffffff
-}
-
-func (s *Scope) parentPtr() uintptr {
-	if s == nil {
-		return 0
-	}
-
-	return s.parent.ptr()
 }
 
 func (s *Scope) prevPtr() []uintptr {
@@ -491,110 +529,84 @@ func (s *Scope) prevPtr() []uintptr {
 }
 
 func (s *Scope) define(name string, id ir.Link) {
-	s.def[name] = s.definition
+	def := s.definition
 	s.definition++
 
-	s.assign(name, id)
+	s.def[name] = def
+	s.vars[def] = id
 }
 
-func (s *Scope) findDef(name string, stop *Scope) int {
-	if s == stop {
-		return -1
+func (s *Scope) assign(name string, d int, id ir.Link) {
+	def := s.findDef(name, d)
+	if def == -1 {
+		panic(name)
 	}
 
-	if def, ok := s.def[name]; ok {
-		return def
-	}
+	tlog.Printw("scope name", "scope", s.id, "name", name, "def", def, "id", id, "from", loc.Callers(1, 3))
+
+	s.vars[def] = id
 }
 
-func (s *Scope) assign(name string, id ir.Link) {
-
-	//	tlog.Printw("scope define", "l", s.Label, "name", name, "id", id, "from", loc.Callers(1, 3))
-	tlog.Printw("scope name", "scope", s.id, "name", name, "id", id, "from", loc.Callers(1, 3))
-	s.vars[name] = id
-}
-
-func (s *Scope) findVar(name string, stop *Scope) (id ir.Link) {
-	if s == stop {
+func (s *Scope) findValue(name string, d int) (id ir.Link) {
+	def := s.findDef(name, d)
+	if def == -1 {
 		return ir.Nowhere
 	}
 
-	defer func() {
-		tlog.Printw("scope find name", "scope", s.sid(), "name", name, "id", id, "from", loc.Callers(1, 3))
-	}()
+	return s.findVar(def, s)
+}
 
-	id, ok := s.out[name]
+func (s *Scope) findVar(def int, src *Scope) (id ir.Link) {
+	id, ok := s.out[def]
 	if ok {
 		return id
 	}
 
-	if stop != nil {
-		defer func() {
-			if id == ir.Nowhere {
-				return
-			}
+	defer func() {
+		if id != ir.Nowhere && s != src {
+			s.out[def] = id
+		}
 
-			if s.id != -1 {
-				id = ir.Link{
-					Block: s.id,
-					Out:   len(s.out),
-				}
-			}
+		tlog.Printw("find var", "p", s.ptr(), "def", def, "src", src.ptr(), "id", id, "from", loc.Callers(1, 3))
+	}()
 
-			s.out[name] = id
-		}()
+	if s.varcb != nil && s != src {
+		return s.varcb(def)
 	}
 
-	id, ok = s.vars[name]
+	id, ok = s.vars[def]
 	if ok {
 		return id
 	}
 
 	switch len(s.prev) {
 	case 0:
+		return ir.Nowhere
 	case 1:
-		id = s.prev[0].findVar(name, s)
-		if id == ir.Nowhere {
-			break
-		}
-
-		return id
+		return s.prev[0].findVar(def, src)
 	default:
-		ids := make(ir.Tuple, len(s.prev))
+		panic(def)
+	}
+}
 
-		found := false
-		nowhere := false
-
-		for i, p := range s.prev {
-			ids[i] = p.findVar(name, s)
-
-			found = found || ids[i] != ir.Nowhere
-			nowhere = nowhere || ids[i] == ir.Nowhere
+func (s *Scope) findDef(name string, d int) int {
+	if d >= s.depth {
+		if def, ok := s.def[name]; ok {
+			return def
 		}
-
-		if !found {
-			break
-		}
-
-		if nowhere {
-			panic(name)
-		}
-
-		return ir.Link{} // will be rewritten anyway
-
-		tlog.Printw("scope branch name", "scope", s.sid(), "name", name, "id", id, "tuple", ids)
-
-		return id
 	}
 
-	id = s.parent.findVar(name, stop)
+	if len(s.prev) == 0 {
+		return -1
+	}
 
-	return id
+	// TODO: maybe check all prev?
+	return s.prev[0].findDef(name, d)
 }
 
 func (s *Scope) ret(ids ...ir.Link) {
 	if s.f == nil {
-		s.parent.ret(ids...)
+		s.prev[0].ret(ids...)
 		return
 	}
 

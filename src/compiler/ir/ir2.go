@@ -59,6 +59,8 @@ type (
 	Loop struct {
 		Cond    Pred
 		Body    BlockID
+		LoopIn  []Link
+		LoopOut []Link
 		Context []Link
 	}
 

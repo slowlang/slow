@@ -1,10 +1,10 @@
 package main
 
 func main(argc int) (rc int) {
-	a = argc
-	b = 3
+	a := argc
+	b := 3
 
-	c = a + b
+	c := a + b
 
 	if a < b {
 		c = c + a
