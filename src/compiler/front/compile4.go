@@ -84,6 +84,26 @@ func (c *Front) Compile(ctx context.Context) (_ *ir.Package, err error) {
 		}
 	}
 
+	if tlog.If("dump") {
+		tlog.Printw("package", "path", p.Path)
+
+		for reg, l := range p.Regs {
+			tlog.Printw("reg", "reg", reg, "link", l)
+		}
+
+		for id, x := range p.Blocks {
+			args := []any{"id", id, "typ", tlog.NextType, x, "val", x}
+
+			if in := x.In(); len(in) != 0 {
+				ls := p.links(in...)
+
+				args = append(args, "links", ls)
+			}
+
+			tlog.Printw("block", args...)
+		}
+	}
+
 	return p.Package, nil
 }
 
@@ -429,7 +449,7 @@ func (c *Front) compileExpr(ctx context.Context, s *Scope, e ast.Expr) (id ir.Re
 			return ir.Nowhere, errors.Wrap(err, "op rhs")
 		}
 
-		var op any
+		var op ir.Block
 
 		switch e.Op.String() {
 		case "+":
@@ -636,6 +656,16 @@ func (p *pkgContext) getfunc(name string) ir.Reg {
 	}
 
 	return id
+}
+
+func (p *pkgContext) links(regs ...ir.Reg) []ir.Link {
+	l := make([]ir.Link, len(regs))
+
+	for i, r := range regs {
+		l[i] = p.Regs[r]
+	}
+
+	return l
 }
 
 func link(b ir.BlockID) ir.Link { return ir.Link{Block: b} }

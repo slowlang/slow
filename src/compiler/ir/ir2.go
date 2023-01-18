@@ -22,6 +22,7 @@ type (
 	}
 
 	Block interface {
+		In() []Reg
 	}
 
 	Tuple []Reg
@@ -82,6 +83,50 @@ type (
 )
 
 var Nowhere Reg = -1
+
+func (x Zero) In() []Reg    { return nil }
+func (x Args) In() []Reg    { return nil }
+func (x Imm) In() []Reg     { return nil }
+func (x Package) In() []Reg { return nil }
+func (x Func) In() []Reg    { return nil }
+
+func (x Tuple) In() []Reg { return x }
+
+func (x Cmp) In() []Reg { return []Reg{x.L, x.R} }
+func (x Add) In() []Reg { return []Reg{x.L, x.R} }
+func (x Sub) In() []Reg { return []Reg{x.L, x.R} }
+func (x Mul) In() []Reg { return []Reg{x.L, x.R} }
+
+func (x *Switch) In() []Reg {
+	var l []Reg
+
+	for _, p := range x.Preds {
+		l = append(l, p.Expr)
+	}
+
+	l = append(l, x.Context...)
+
+	return l
+}
+
+func (x *Loop) In() []Reg {
+	var l []Reg
+
+	l = append(l, x.Cond.Expr)
+	l = append(l, x.LoopIn...)
+	l = append(l, x.Context...)
+
+	return l
+}
+
+func (x Call) In() []Reg {
+	var l []Reg
+
+	l = append(l, x.Args...)
+	l = append(l, x.Context...)
+
+	return l
+}
 
 func (l Link) TlogAppend(b []byte) []byte {
 	var e tlwire.Encoder
