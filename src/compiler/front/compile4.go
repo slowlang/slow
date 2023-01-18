@@ -19,8 +19,8 @@ type (
 	pkgContext struct {
 		*ir.Package
 
-		zero       ir.Link
-		funcByName map[string]ir.BlockID
+		zero       ir.Reg
+		funcByName map[string]ir.Reg
 
 		definition int
 	}
@@ -31,10 +31,10 @@ type (
 		id ir.BlockID
 
 		def  map[string]int
-		vars map[int]ir.Link
-		out  map[int]ir.Link
+		vars map[int]ir.Reg
+		out  map[int]ir.Reg
 
-		varcb func(def int) ir.Link
+		varcb func(def int) ir.Reg
 
 		depth int
 		prev  []*Scope
@@ -48,10 +48,10 @@ type (
 func (c *Front) Compile(ctx context.Context) (_ *ir.Package, err error) {
 	p := &pkgContext{
 		Package:    &ir.Package{},
-		funcByName: map[string]ir.BlockID{},
+		funcByName: map[string]ir.Reg{},
 	}
 
-	p.zero = p.addlink(ir.Zero{})
+	p.zero = p.alloc(p.add(ir.Zero{}), 0)
 	p.Self = p.add(p.Package)
 
 	s := newScope(p.Self, 0)
@@ -66,7 +66,8 @@ func (c *Front) Compile(ctx context.Context) (_ *ir.Package, err error) {
 				}
 
 				id := p.add(f)
-				p.funcByName[f.Name] = id
+				reg := p.alloc(id, 0)
+				p.funcByName[f.Name] = reg
 				p.Funcs = append(p.Funcs, id)
 			}
 		}
@@ -96,7 +97,8 @@ func (c *Front) compileDecl(ctx context.Context, s *Scope, d ast.Decl) (err erro
 }
 
 func (c *Front) compileFunc(ctx context.Context, par *Scope, fn *ast.FuncDecl) (err error) {
-	fid := par.funcByName[fn.Name.Name]
+	freg := par.funcByName[fn.Name.Name]
+	fid := par.Regs[freg].Block
 	f := par.Blocks[fid].(*ir.Func)
 
 	tlog.Printw("compile func", "name", f.Name)
@@ -104,7 +106,7 @@ func (c *Front) compileFunc(ctx context.Context, par *Scope, fn *ast.FuncDecl) (
 	s := newScope(fid, 1, par)
 	s.f = f
 
-	f.Args = s.add(ir.Args{})
+	f.Args = s.add(ir.Args(-1))
 	args := 0
 
 	for _, p := range fn.Type.Params.List {
@@ -116,11 +118,14 @@ func (c *Front) compileFunc(ctx context.Context, par *Scope, fn *ast.FuncDecl) (
 		}
 
 		for _, name := range p.Names {
-			s.define(name.Name, ir.Link{Block: f.Args, Out: args})
+			reg := s.alloc(f.Args, args)
+			s.define(name.Name, reg)
 			args++
 			//	f.Args = append(f.Args, 0)
 		}
 	}
+
+	s.Blocks[f.Args] = ir.Args(args)
 
 	for _, p := range fn.Type.Results.List {
 		if len(p.Names) == 0 {
@@ -179,7 +184,7 @@ func (c *Front) compileBlock(ctx context.Context, s *Scope, b *ast.BlockStmt) (_
 func (c *Front) compileStmt(ctx context.Context, s *Scope, x ast.Stmt) (_ *Scope, err error) {
 	switch x := x.(type) {
 	case *ast.ReturnStmt:
-		ids := make([]ir.Link, len(x.Results))
+		ids := make([]ir.Reg, len(x.Results))
 
 		for i, e := range x.Results {
 			ids[i], err = c.compileExpr(ctx, s, e)
@@ -197,7 +202,7 @@ func (c *Front) compileStmt(ctx context.Context, s *Scope, x ast.Stmt) (_ *Scope
 			panic("bad assign")
 		}
 
-		ids := make([]ir.Link, len(x.Rhs))
+		ids := make([]ir.Reg, len(x.Rhs))
 
 		for i, e := range x.Rhs {
 			ids[i], err = c.compileExpr(ctx, s, e)
@@ -294,7 +299,7 @@ func (c *Front) compileIf(ctx context.Context, s *Scope, x *ast.IfStmt) (_ *Scop
 
 	s = newScope(id, -1, branches...)
 
-	s.varcb = func(def int) ir.Link {
+	s.varcb = func(def int) ir.Reg {
 		var out int
 
 		for _, sub := range branches {
@@ -309,10 +314,7 @@ func (c *Front) compileIf(ctx context.Context, s *Scope, x *ast.IfStmt) (_ *Scop
 			s.Blocks[sub.id] = tup
 		}
 
-		return ir.Link{
-			Block: id,
-			Out:   out,
-		}
+		return s.alloc(id, out)
 	}
 
 	next := newScope(-1, 0, s)
@@ -360,7 +362,7 @@ func (c *Front) compileFor(ctx context.Context, s *Scope, x *ast.ForStmt) (_ *Sc
 
 	tlog.Printw("loop", "prev.out", prev.out, "body.out", s.out, "body.vars", s.vars)
 
-	s.varcb = func(def int) ir.Link {
+	s.varcb = func(def int) ir.Reg {
 		res := s.findVar(def, s)
 		if res == ir.Nowhere {
 			panic(def)
@@ -371,10 +373,7 @@ func (c *Front) compileFor(ctx context.Context, s *Scope, x *ast.ForStmt) (_ *Sc
 		tup = append(tup, res)
 		s.Blocks[b.Body] = tup
 
-		return ir.Link{
-			Block: id,
-			Out:   out,
-		}
+		return s.alloc(id, out)
 	}
 
 	next := newScope(-1, 0, s)
@@ -382,7 +381,7 @@ func (c *Front) compileFor(ctx context.Context, s *Scope, x *ast.ForStmt) (_ *Sc
 	return next, nil
 }
 
-func (c *Front) compileCond(ctx context.Context, s *Scope, e ast.Expr) (cc ir.Cond, id ir.Link, err error) {
+func (c *Front) compileCond(ctx context.Context, s *Scope, e ast.Expr) (cc ir.Cond, id ir.Reg, err error) {
 	switch e := e.(type) {
 	case *ast.BinaryExpr:
 		switch op := e.Op.String(); op {
@@ -400,7 +399,7 @@ func (c *Front) compileCond(ctx context.Context, s *Scope, e ast.Expr) (cc ir.Co
 	return
 }
 
-func (c *Front) compileExpr(ctx context.Context, s *Scope, e ast.Expr) (id ir.Link, err error) {
+func (c *Front) compileExpr(ctx context.Context, s *Scope, e ast.Expr) (id ir.Reg, err error) {
 	switch e := e.(type) {
 	case *ast.Ident:
 		id = s.findValue(e.Name, s.depth)
@@ -415,7 +414,7 @@ func (c *Front) compileExpr(ctx context.Context, s *Scope, e ast.Expr) (id ir.Li
 				return ir.Nowhere, errors.Wrap(err, "")
 			}
 
-			id = link(s.add(ir.Imm(x)))
+			id = s.alloc(s.add(ir.Imm(x)), 0)
 		default:
 			panic(e.Kind)
 		}
@@ -457,13 +456,13 @@ func (c *Front) compileExpr(ctx context.Context, s *Scope, e ast.Expr) (id ir.Li
 			panic(e.Op)
 		}
 
-		id = link(s.add(op))
+		id = s.alloc(s.add(op), 0)
 	case *ast.CallExpr:
 		n := e.Fun.(*ast.Ident)
 
 		x := ir.Call{
-			Func: link(s.getfunc(n.Name)),
-			Args: make([]ir.Link, len(e.Args)),
+			Func: s.getfunc(n.Name),
+			Args: make([]ir.Reg, len(e.Args)),
 		}
 
 		for i, a := range e.Args {
@@ -473,7 +472,9 @@ func (c *Front) compileExpr(ctx context.Context, s *Scope, e ast.Expr) (id ir.Li
 			}
 		}
 
-		id = link(s.add(x))
+		// TODO: alloc regs for all results
+
+		id = s.alloc(s.add(x), 0)
 	default:
 		panic(fmt.Sprintf("%T: %[1]v", e))
 	}
@@ -485,8 +486,8 @@ func newScope(id ir.BlockID, d int, prev ...*Scope) *Scope {
 	s := &Scope{
 		id:    id,
 		def:   map[string]int{},
-		vars:  map[int]ir.Link{},
-		out:   map[int]ir.Link{},
+		vars:  map[int]ir.Reg{},
+		out:   map[int]ir.Reg{},
 		depth: d,
 		prev:  prev,
 		from:  loc.Caller(1),
@@ -528,7 +529,7 @@ func (s *Scope) prevPtr() []uintptr {
 	return l
 }
 
-func (s *Scope) define(name string, id ir.Link) {
+func (s *Scope) define(name string, id ir.Reg) {
 	def := s.definition
 	s.definition++
 
@@ -536,7 +537,7 @@ func (s *Scope) define(name string, id ir.Link) {
 	s.vars[def] = id
 }
 
-func (s *Scope) assign(name string, d int, id ir.Link) {
+func (s *Scope) assign(name string, d int, id ir.Reg) {
 	def := s.findDef(name, d)
 	if def == -1 {
 		panic(name)
@@ -547,7 +548,7 @@ func (s *Scope) assign(name string, d int, id ir.Link) {
 	s.vars[def] = id
 }
 
-func (s *Scope) findValue(name string, d int) (id ir.Link) {
+func (s *Scope) findValue(name string, d int) (id ir.Reg) {
 	def := s.findDef(name, d)
 	if def == -1 {
 		return ir.Nowhere
@@ -556,7 +557,7 @@ func (s *Scope) findValue(name string, d int) (id ir.Link) {
 	return s.findVar(def, s)
 }
 
-func (s *Scope) findVar(def int, src *Scope) (id ir.Link) {
+func (s *Scope) findVar(def int, src *Scope) (id ir.Reg) {
 	id, ok := s.out[def]
 	if ok {
 		return id
@@ -604,7 +605,7 @@ func (s *Scope) findDef(name string, d int) int {
 	return s.prev[0].findDef(name, d)
 }
 
-func (s *Scope) ret(ids ...ir.Link) {
+func (s *Scope) ret(ids ...ir.Reg) {
 	if s.f == nil {
 		s.prev[0].ret(ids...)
 		return
@@ -614,22 +615,21 @@ func (s *Scope) ret(ids ...ir.Link) {
 	s.f.Results = ids
 }
 
-func (p *pkgContext) id() ir.BlockID {
-	return ir.BlockID(len(p.Package.Blocks))
+func (p *pkgContext) alloc(x ir.BlockID, o int) ir.Reg {
+	id := ir.Reg(len(p.Package.Regs))
+	p.Package.Regs = append(p.Package.Regs, ir.Link{Block: x, Out: o})
+
+	return id
 }
 
 func (p *pkgContext) add(x ir.Block) ir.BlockID {
-	id := p.id()
+	id := ir.BlockID(len(p.Package.Blocks))
 	p.Package.Blocks = append(p.Package.Blocks, x)
 
 	return id
 }
 
-func (p *pkgContext) addlink(x ir.Block) ir.Link {
-	return link(p.add(x))
-}
-
-func (p *pkgContext) getfunc(name string) ir.BlockID {
+func (p *pkgContext) getfunc(name string) ir.Reg {
 	id, ok := p.funcByName[name]
 	if !ok {
 		panic(name)

@@ -47,7 +47,7 @@ type (
 	}
 
 	BCond struct {
-		Expr  ir.Link
+		Expr  ir.Reg
 		Cond  ir.Cond
 		Label Label
 	}
@@ -198,7 +198,7 @@ func (c *Compiler) iselectSwitch(ctx context.Context, p *pkgContext, b ir.BlockI
 	_ = base
 
 	for _, id := range x.Context {
-		err = c.iselectBlock(ctx, p, id.Block)
+		err = c.iselectBlock(ctx, p, p.Regs[id].Block)
 		if err != nil {
 			return err
 		}
@@ -208,7 +208,7 @@ func (c *Compiler) iselectSwitch(ctx context.Context, p *pkgContext, b ir.BlockI
 	end := p.label()
 
 	for i, pred := range x.Preds {
-		err = c.iselectBlock(ctx, p, pred.Expr.Block)
+		err = c.iselectBlock(ctx, p, p.Regs[pred.Expr].Block)
 		if err != nil {
 			return err
 		}
@@ -254,8 +254,8 @@ func (c *Compiler) iselectLoop(ctx context.Context, p *pkgContext, b ir.BlockID,
 	return nil
 }
 
-func (c *Compiler) iselectOp(ctx context.Context, p *pkgContext, x any, links ...ir.Link) (err error) {
-	err = c.iselectLinks(ctx, p, links...)
+func (c *Compiler) iselectOp(ctx context.Context, p *pkgContext, x any, regs ...ir.Reg) (err error) {
+	err = c.iselectLinks(ctx, p, regs...)
 	if err != nil {
 		return err
 	}
@@ -265,9 +265,9 @@ func (c *Compiler) iselectOp(ctx context.Context, p *pkgContext, x any, links ..
 	return nil
 }
 
-func (c *Compiler) iselectLinks(ctx context.Context, p *pkgContext, links ...ir.Link) (err error) {
-	for _, x := range links {
-		err = c.iselectBlock(ctx, p, x.Block)
+func (c *Compiler) iselectLinks(ctx context.Context, p *pkgContext, regs ...ir.Reg) (err error) {
+	for _, x := range regs {
+		err = c.iselectBlock(ctx, p, p.Regs[x].Block)
 		if err != nil {
 			return err
 		}
@@ -279,7 +279,7 @@ func (c *Compiler) iselectLinks(ctx context.Context, p *pkgContext, links ...ir.
 func (c *Compiler) analyzeBlock(ctx context.Context, p *pkgContext, l ir.Link) (err error) {
 	b := l.Block
 	x := p.Blocks[b]
-	s := &p.s[l.Block]
+	s := &p.s[b]
 
 	s.Outs |= 1 << l.Out
 	s.Used++
@@ -304,15 +304,15 @@ func (c *Compiler) analyzeBlock(ctx context.Context, p *pkgContext, l ir.Link) (
 	case *ir.Loop:
 		err = c.analyzeLoop(ctx, p, l, x)
 	case ir.Cmp:
-		err = c.analyzeLinks(ctx, p, b, x.L, x.R)
+		err = c.analyzeRegs(ctx, p, b, x.L, x.R)
 	case ir.Add:
-		err = c.analyzeLinks(ctx, p, b, x.L, x.R)
+		err = c.analyzeRegs(ctx, p, b, x.L, x.R)
 	case ir.Sub:
-		err = c.analyzeLinks(ctx, p, b, x.L, x.R)
+		err = c.analyzeRegs(ctx, p, b, x.L, x.R)
 	case ir.Mul:
-		err = c.analyzeLinks(ctx, p, b, x.L, x.R)
+		err = c.analyzeRegs(ctx, p, b, x.L, x.R)
 	case ir.Tuple:
-		err = c.analyzeLinks(ctx, p, b, x...)
+		err = c.analyzeRegs(ctx, p, b, x...)
 	default:
 		panic(x)
 	}
@@ -348,7 +348,7 @@ func (c *Compiler) analyzeFunc(ctx context.Context, p *pkgContext, b ir.BlockID,
 
 	defer p.addUser(b)()
 
-	err = c.analyzeLinks(ctx, p, b, f.Results...)
+	err = c.analyzeRegs(ctx, p, b, f.Results...)
 	if err != nil {
 		return errors.Wrap(err, "body")
 	}
@@ -360,16 +360,18 @@ func (c *Compiler) analyzeSwitch(ctx context.Context, p *pkgContext, l ir.Link, 
 	max := 0
 
 	for i, pred := range x.Preds {
-		err = c.analyzeBlock(ctx, p, pred.Expr)
+		pl := p.Regs[pred.Expr]
+
+		err = c.analyzeBlock(ctx, p, pl)
 		if err != nil {
 			return errors.Wrap(err, "pred %d", i)
 		}
 
-		if h := p.s[pred.Expr.Block].Height; h > max {
+		if h := p.s[pl.Block].Height; h > max {
 			max = h
 		}
 
-		p.s[l.Block].Uses.Or(p.s[pred.Expr.Block].Uses)
+		p.s[l.Block].Uses.Or(p.s[pl.Block].Uses)
 	}
 
 	var context bitmap.Big
@@ -404,7 +406,7 @@ func (c *Compiler) analyzeSwitch(ctx context.Context, p *pkgContext, l ir.Link, 
 	tlog.Printw("switch context", "id", l.Block, "context", context, "noprev", context.AndNotCp(prev))
 
 	context.Range(func(i int) bool {
-		x.Context = append(x.Context, link(ir.BlockID(i)))
+		//	x.Context = append(x.Context, link(ir.BlockID(i)))
 
 		return true
 	})
@@ -415,7 +417,17 @@ func (c *Compiler) analyzeSwitch(ctx context.Context, p *pkgContext, l ir.Link, 
 }
 
 func (c *Compiler) analyzeLoop(ctx context.Context, p *pkgContext, l ir.Link, x *ir.Loop) (err error) {
-	return c.analyzeLinks(ctx, p, l.Block, x.Cond.Expr, ir.Link{Block: x.Body, Out: l.Out})
+	return c.analyzeLinks(ctx, p, l.Block, p.Regs[x.Cond.Expr], ir.Link{Block: x.Body, Out: l.Out})
+}
+
+func (c *Compiler) analyzeRegs(ctx context.Context, p *pkgContext, b ir.BlockID, regs ...ir.Reg) (err error) {
+	links := make([]ir.Link, len(regs))
+
+	for i, reg := range regs {
+		links[i] = p.Regs[reg]
+	}
+
+	return c.analyzeLinks(ctx, p, b, links...)
 }
 
 func (c *Compiler) analyzeLinks(ctx context.Context, p *pkgContext, b ir.BlockID, links ...ir.Link) (err error) {

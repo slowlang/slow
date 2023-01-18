@@ -12,27 +12,27 @@ type (
 		Funcs []BlockID
 
 		Blocks []Block `tlog:"-"`
+		Regs   []Link  `tlog:"-"`
 	}
 
 	Func struct {
 		Name    string
 		Args    BlockID
-		Results []Link
+		Results []Reg
 	}
 
 	Block interface {
-		//	In() []Link
-		//	Out() []Link
 	}
 
-	Tuple []Link
+	Tuple []Reg
 
-	Type    int
+	Args    int
 	BlockID int
 	Cond    string
 	Imm     int64
+	Reg     int
+	Type    int
 	Zero    struct{}
-	Args    struct{}
 
 	Link struct {
 		Block BlockID
@@ -40,53 +40,53 @@ type (
 	}
 
 	Call struct {
-		Func    Link
-		Args    []Link
-		Context []Link
+		Func    Reg
+		Args    []Reg
+		Context []Reg
 	}
 
 	Pred struct {
-		Expr Link
+		Expr Reg
 		Cond Cond
 	}
 
 	Switch struct {
 		Preds   []Pred
 		Blocks  []BlockID
-		Context []Link
+		Context []Reg
 	}
 
 	Loop struct {
 		Cond    Pred
 		Body    BlockID
-		LoopIn  []Link
-		LoopOut []Link
-		Context []Link
+		LoopIn  []Reg
+		LoopOut []Reg
+		Context []Reg
 	}
 
 	Cmp struct {
-		L, R Link
+		L, R Reg
 	}
 
 	Add struct {
-		L, R Link
+		L, R Reg
 	}
 
 	Sub struct {
-		L, R Link
+		L, R Reg
 	}
 
 	Mul struct {
-		L, R Link
+		L, R Reg
 	}
 )
 
-var Nowhere = Link{Block: -1}
+var Nowhere Reg = -1
 
 func (l Link) TlogAppend(b []byte) []byte {
 	var e tlwire.Encoder
 
-	if l == Nowhere {
+	if l.Block == -1 {
 		return e.AppendNil(b)
 	}
 
