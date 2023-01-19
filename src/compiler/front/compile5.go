@@ -19,7 +19,8 @@ type (
 		*ir.Package
 
 		zero ir.Expr
-		exit ir.Label
+
+		exit *Scope
 
 		definition int
 		lab        ir.Label
@@ -42,6 +43,8 @@ type (
 		phi  []ir.Expr
 		code []ir.Expr
 
+		retvals []ir.Expr
+
 		deadend bool
 
 		from loc.PC
@@ -55,8 +58,7 @@ func (c *Front) Compile(ctx context.Context) (_ *ir.Package, err error) {
 
 	p.zero = p.alloc(ir.Zero{})
 
-	s := newScope(-1, 0)
-	s.pkgContext = p
+	s := rootScope(p)
 
 	for _, f := range c.files {
 		//	tlog.Printw("file", "f", f)
@@ -90,9 +92,11 @@ func (c *Front) compileFunc(ctx context.Context, par *Scope, fn *ast.FuncDecl) (
 
 	tlog.Printw("compile func", "name", f.Name)
 
-	s := newScope(-1, 1, par)
+	s := par.nextScope(-1, 1, par)
 	s.f = f
-	s.exit = s.label()
+
+	lexit := s.label()
+	s.exit = par.nextScope(lexit, -1)
 
 	argsStart := s.pkgContext.id()
 
@@ -139,7 +143,27 @@ func (c *Front) compileFunc(ctx context.Context, par *Scope, fn *ast.FuncDecl) (
 		return errors.Wrap(err, "body")
 	}
 
-	exit := newScope(s.exit, 0, end)
+	if !end.deadend {
+		end.branchTo(s.exit)
+	}
+
+	f.Out = make([]ir.Expr, len(f.Out))
+
+	for i := range f.Out {
+		phi := make(ir.Phi, 0, len(s.exit.prev))
+
+		for _, p := range s.exit.prev {
+			if p.retvals == nil {
+				continue
+			}
+
+			tlog.Printw("ret phi", "prev", p.ptr(), "retvals", p.retvals)
+
+			phi = append(phi, p.retvals[i])
+		}
+
+		f.Out[i] = s.exit.addphi(phi)
+	}
 
 	done := map[*Scope]struct{}{}
 
@@ -180,7 +204,7 @@ func (c *Front) compileFunc(ctx context.Context, par *Scope, fn *ast.FuncDecl) (
 		if s.id >= 0 {
 			x := s.Exprs[s.id]
 
-			tlog.Printw("label", "id", s.id, "typ", tlog.NextType, x, "val", x)
+			tlog.Printw("label", "id", s.id, "typ", tlog.NextIsType, x, "val", x)
 
 			f.Code = append(f.Code, s.id)
 		}
@@ -188,19 +212,21 @@ func (c *Front) compileFunc(ctx context.Context, par *Scope, fn *ast.FuncDecl) (
 		for _, id := range s.phi {
 			x := s.Exprs[id]
 
-			tlog.Printw("phi", "id", id, "typ", tlog.NextType, x, "val", x)
+			tlog.Printw("phi", "id", id, "typ", tlog.NextIsType, x, "val", x)
 		}
+
+		f.Code = append(f.Code, s.phi...)
 
 		for _, id := range s.code {
 			x := s.Exprs[id]
 
-			tlog.Printw("code", "id", id, "typ", tlog.NextType, x, "val", x)
+			tlog.Printw("code", "id", id, "typ", tlog.NextIsType, x, "val", x)
 		}
 
 		f.Code = append(f.Code, s.code...)
 	}
 
-	pr(exit)
+	pr(s.exit)
 
 	/*
 		for _, id := range f.Code {
@@ -283,7 +309,7 @@ func (c *Front) compileStmt(ctx context.Context, s *Scope, x ast.Stmt) (_ *Scope
 }
 
 func (c *Front) compileIf(ctx context.Context, prev *Scope, x *ast.IfStmt) (_ *Scope, err error) {
-	scond := newScope(-1, 1, prev)
+	scond := prev.nextScope(-1, 1, prev)
 
 	var labels []ir.Label
 	end := prev.label()
@@ -329,7 +355,7 @@ func (c *Front) compileIf(ctx context.Context, prev *Scope, x *ast.IfStmt) (_ *S
 	var branches []*Scope
 
 	for i := 0; ; {
-		sub := newScope(labels[i], 1, scond)
+		sub := scond.nextScope(labels[i], 1, scond)
 
 		sub, err = c.compileBlock(ctx, sub, x.Body)
 		if err != nil {
@@ -338,15 +364,14 @@ func (c *Front) compileIf(ctx context.Context, prev *Scope, x *ast.IfStmt) (_ *S
 
 		if !sub.deadend {
 			sub.add(ir.B{Label: end})
+			branches = append(branches, sub)
 		}
-
-		branches = append(branches, sub)
 
 		i++
 
 		switch xx := x.Else.(type) {
 		case *ast.BlockStmt:
-			sub := newScope(labels[i], 1, scond)
+			sub := scond.nextScope(labels[i], 1, scond)
 
 			sub, err = c.compileBlock(ctx, sub, xx)
 			if err != nil {
@@ -355,12 +380,11 @@ func (c *Front) compileIf(ctx context.Context, prev *Scope, x *ast.IfStmt) (_ *S
 
 			if !sub.deadend {
 				sub.add(ir.B{Label: end})
+				branches = append(branches, sub)
 			}
-
-			branches = append(branches, sub)
 		case nil:
-			sub := newScope(-1, 1, scond)
-
+			sub := scond.nextScope(-1, 1, scond)
+			//	sub.add(ir.B{Label: end})
 			branches = append(branches, sub)
 		case *ast.IfStmt:
 			x = xx
@@ -372,7 +396,7 @@ func (c *Front) compileIf(ctx context.Context, prev *Scope, x *ast.IfStmt) (_ *S
 		break
 	}
 
-	s := newScope(end, -2, branches...)
+	s := prev.nextScope(end, 0, branches...)
 
 	s.varcb = func(s *Scope, def int) ir.Expr {
 		phi := make(ir.Phi, 0, len(branches))
@@ -404,7 +428,7 @@ func (c *Front) compileIf(ctx context.Context, prev *Scope, x *ast.IfStmt) (_ *S
 		return id
 	}
 
-	next := newScope(-1, 0, s)
+	next := s.nextScope(-1, 0, s)
 
 	return next, nil
 }
@@ -414,7 +438,7 @@ func (c *Front) compileFor(ctx context.Context, prev *Scope, x *ast.ForStmt) (_ 
 		lcond := prev.label()
 		prev.add(ir.B{Label: lcond})
 
-		scond := newScope(lcond, 1, prev)
+		scond := prev.nextScope(lcond, 1, prev)
 
 		scond.varcb = func(s *Scope, def int) ir.Expr {
 			id := s.prev[0].findVar(def, s)
@@ -443,7 +467,7 @@ func (c *Front) compileFor(ctx context.Context, prev *Scope, x *ast.ForStmt) (_ 
 
 		scond.add(ir.B{Label: lend})
 
-		sbody := newScope(lbody, 1, scond)
+		sbody := scond.nextScope(lbody, 1, scond)
 		scond.prev = append(scond.prev, sbody)
 
 		sbody, err = c.compileBlock(ctx, sbody, x.Body)
@@ -464,7 +488,7 @@ func (c *Front) compileFor(ctx context.Context, prev *Scope, x *ast.ForStmt) (_ 
 			scond.Exprs[id] = phi
 		}
 
-		send := newScope(lend, -2, scond)
+		send := prev.nextScope(lend, 0, scond)
 
 		return send, nil
 	} else {
@@ -473,7 +497,7 @@ func (c *Front) compileFor(ctx context.Context, prev *Scope, x *ast.ForStmt) (_ 
 		lbody := prev.label()
 		prev.add(ir.B{Label: lbody})
 
-		sbody := newScope(lbody, 1, prev)
+		sbody := prev.nextScope(lbody, 1, prev)
 
 		sbody.varcb = func(s *Scope, def int) ir.Expr {
 			id := s.prev[0].findVar(def, s)
@@ -491,7 +515,7 @@ func (c *Front) compileFor(ctx context.Context, prev *Scope, x *ast.ForStmt) (_ 
 			return nil, errors.Wrap(err, "body")
 		}
 
-		sbodyEnd.add(ir.B{Label: lbody})
+		sbodyEnd.branchTo(sbody)
 		sbodyEnd.deadend = true
 
 		for def, id := range sbody.in {
@@ -508,8 +532,7 @@ func (c *Front) compileFor(ctx context.Context, prev *Scope, x *ast.ForStmt) (_ 
 			sbody.Exprs[id] = phi
 		}
 
-		send := newScope(lend, -1, sbodyEnd) // TODO
-		//send.prev = send.prev[:0]
+		send := prev.nextScope(lend, 0, sbodyEnd)
 
 		return send, nil
 	}
@@ -621,22 +644,25 @@ func (c *Front) compileExpr(ctx context.Context, s *Scope, e ast.Expr) (id ir.Ex
 	return
 }
 
-func newScope(lab ir.Label, d int, prev ...*Scope) *Scope {
-	s := &Scope{
-		id:    -1,
-		def:   map[string]int{},
-		vars:  map[int]ir.Expr{},
-		in:    map[int]ir.Expr{},
-		depth: d,
-		prev:  prev,
-		from:  loc.Caller(1),
-	}
+func rootScope(p *pkgContext) *Scope {
+	return &Scope{
+		id:   -1,
+		def:  map[string]int{},
+		vars: map[int]ir.Expr{},
+		in:   map[int]ir.Expr{},
+		from: loc.Caller(1),
 
-	if prev != nil {
-		s.depth += prev[0].depth
-		s.pkgContext = prev[0].pkgContext
-		s.f = prev[0].f
+		pkgContext: p,
 	}
+}
+
+func (par *Scope) nextScope(lab ir.Label, d int, prev ...*Scope) *Scope {
+	s := rootScope(par.pkgContext)
+	s.from = loc.Caller(1)
+	s.prev = prev
+
+	s.f = par.f
+	s.depth = par.depth + d
 
 	if lab >= 0 {
 		s.id = s.alloc(lab)
@@ -645,6 +671,26 @@ func newScope(lab ir.Label, d int, prev ...*Scope) *Scope {
 	tlog.Printw("new scope", "p", s.ptr(), "lab", s.idlabel(), "d", s.depth, "prev", s.prevPtr(), "from", loc.Callers(1, 3))
 
 	return s
+}
+
+func (s *Scope) branchTo(to *Scope) {
+	s.add(ir.B{Label: to.idlabel()})
+
+	to.prev = append(to.prev, s)
+}
+
+func (s *Scope) ret(ids ...ir.Expr) {
+	tlog.Printw("ret", "s", s.id, "f", s.f)
+
+	if len(s.f.Out) != len(ids) {
+		panic("mismatch")
+	}
+
+	// TODO
+	s.retvals = ids
+	s.deadend = true
+
+	s.branchTo(s.exit)
 }
 
 func (s *Scope) ptr() uintptr {
@@ -779,20 +825,6 @@ func (s *Scope) findDef(name string, d int) int {
 
 	// TODO: maybe check all prev?
 	return s.prev[0].findDef(name, d)
-}
-
-func (s *Scope) ret(ids ...ir.Expr) {
-	tlog.Printw("ret", "s", s.id, "f", s.f)
-
-	if len(s.f.Out) != len(ids) {
-		panic("mismatch")
-	}
-
-	// TODO
-	s.f.Out = ids
-	s.deadend = true
-
-	s.add(ir.B{Label: s.exit})
 }
 
 func (p *pkgContext) id() ir.Expr {

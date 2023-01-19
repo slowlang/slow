@@ -1,6 +1,8 @@
 package bitmap
 
 import (
+	"math/bits"
+
 	"github.com/nikandfor/tlog/tlwire"
 )
 
@@ -11,12 +13,12 @@ type (
 	}
 )
 
-func NewBitmap() *Big {
-	s := MakeBitmap()
+func New() *Big {
+	s := Make()
 	return &s
 }
 
-func MakeBitmap() Big {
+func Make() Big {
 	s := Big{}
 	s.b = s.b0[:]
 
@@ -69,6 +71,13 @@ func (s Big) And(x Big) {
 	}
 }
 
+func (s Big) AndCp(x Big) Big {
+	cp := s.Copy()
+	cp.And(x)
+
+	return cp
+}
+
 func (s Big) AndNot(x Big) {
 	for i, x := range x.b {
 		if i == len(s.b) {
@@ -86,15 +95,29 @@ func (s Big) AndNotCp(x Big) Big {
 	return cp
 }
 
+func (s *Big) FillSet(l, r int) {
+	for i := l; i < r; i++ {
+		s.Set(i)
+	}
+}
+
 func (s Big) Copy() Big {
-	r := MakeBitmap()
+	r := Make()
 	r.Or(s)
 	return r
 }
 
 func (s Big) CopyPtr() *Big {
-	r := NewBitmap()
+	r := New()
 	r.Or(s)
+	return r
+}
+
+func (s Big) Size() (r int) {
+	for _, c := range s.b {
+		r += bits.OnesCount64(c)
+	}
+
 	return r
 }
 
@@ -110,6 +133,7 @@ func (s Big) Range(f func(i int) bool) {
 			continue
 		}
 
+		//	for j := bits.TrailingZeros64(x); j < bits.Len64(x); j++ {
 		for j := 0; j < 64; j++ {
 			if (x & (1 << j)) == 0 {
 				continue
@@ -120,6 +144,20 @@ func (s Big) Range(f func(i int) bool) {
 			}
 		}
 	}
+}
+
+func (s Big) First() int {
+	for i, x := range s.b {
+		if x == 0 {
+			continue
+		}
+
+		j := bits.TrailingZeros64(x)
+
+		return i*64 + j
+	}
+
+	return -1
 }
 
 func (s Big) TlogAppend(b []byte) []byte {

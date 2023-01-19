@@ -1,0 +1,19 @@
+package main
+
+func main() int {
+	i := 1
+
+	for {
+		i = i + 1
+
+		if i < 10 {
+			continue
+		}
+
+		if i > 100 {
+			break
+		}
+	}
+
+	return i
+}
