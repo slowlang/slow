@@ -31,11 +31,12 @@ type (
 		id ir.Expr
 		f  *ir.Func
 
+		brea *Scope
+		cont *Scope
+
 		def  map[string]int
 		vars map[int]ir.Expr
 		in   map[int]ir.Expr
-
-		varcb func(s *Scope, def int) ir.Expr
 
 		depth int
 		prev  []*Scope
@@ -45,10 +46,13 @@ type (
 
 		retvals []ir.Expr
 
-		deadend bool
+		delayphi bool
+		deadend  bool
 
 		from loc.PC
 	}
+
+	visitSet map[*Scope]struct{}
 )
 
 func (c *Front) Compile(ctx context.Context) (_ *ir.Package, err error) {
@@ -201,6 +205,8 @@ func (c *Front) compileFunc(ctx context.Context, par *Scope, fn *ast.FuncDecl) (
 		tlog.Printw("scope", args...)
 		//	tlog.Printw("scope", "p", s.ptr(), "prev", s.prevPtr(), "lab", s.idlabel(), "d", s.depth, "in", s.in, "def", s.def, "vars", s.vars, "from", tlog.FormatNext("%x"), s.from)
 
+		s.fixPhi()
+
 		if s.id >= 0 {
 			x := s.Exprs[s.id]
 
@@ -301,6 +307,15 @@ func (c *Front) compileStmt(ctx context.Context, s *Scope, x ast.Stmt) (_ *Scope
 		if err != nil {
 			return s, errors.Wrap(err, "for")
 		}
+	case *ast.BranchStmt:
+		switch x.Tok {
+		case token.BREAK:
+			s.doBreak()
+		case token.CONTINUE:
+			s.doContinue()
+		default:
+			panic(x)
+		}
 	default:
 		panic(x)
 	}
@@ -396,146 +411,64 @@ func (c *Front) compileIf(ctx context.Context, prev *Scope, x *ast.IfStmt) (_ *S
 		break
 	}
 
-	s := prev.nextScope(end, 0, branches...)
-
-	s.varcb = func(s *Scope, def int) ir.Expr {
-		phi := make(ir.Phi, 0, len(branches))
-
-	branch:
-		for _, sub := range branches {
-			if sub.deadend {
-				continue
-			}
-
-			res := sub.findVar(def, nil)
-			if res == -1 {
-				panic(def)
-			}
-
-			for _, x := range phi {
-				if x == res {
-					continue branch
-				}
-			}
-
-			phi = append(phi, res)
-		}
-
-		id := s.addphi(phi)
-
-		s.in[def] = id
-
-		return id
-	}
-
-	next := s.nextScope(-1, 0, s)
+	next := prev.nextScope(end, 0, branches...)
 
 	return next, nil
 }
 
 func (c *Front) compileFor(ctx context.Context, prev *Scope, x *ast.ForStmt) (_ *Scope, err error) {
+	lcond := prev.label()
+	lbody := prev.label()
+	lend := prev.label()
+
+	scond := prev.nextScope(lcond, 1, prev)
+	sbody := prev.nextScope(lbody, 2, scond)
+	send := prev.nextScope(lend, 0, scond)
+
+	scond.prev = append(scond.prev, sbody)
+
+	for _, s := range []*Scope{scond, sbody, send} {
+		s := s
+
+		s.delayphi = true
+
+		defer func() {
+			s.delayphi = false
+		}()
+	}
+
+	sbody.cont = scond
+	sbody.brea = send
+
+	// cond
+
+	prev.add(ir.B{Label: lcond})
+
 	if x.Cond != nil {
-		lcond := prev.label()
-		prev.add(ir.B{Label: lcond})
-
-		scond := prev.nextScope(lcond, 1, prev)
-
-		scond.varcb = func(s *Scope, def int) ir.Expr {
-			id := s.prev[0].findVar(def, s)
-
-			phi := ir.Phi{id}
-			res := s.addphi(phi)
-
-			s.in[def] = res
-
-			return res
-		}
-
 		cond, condExpr, err := c.compileCond(ctx, scond, x.Cond)
 		if err != nil {
 			return nil, errors.Wrap(err, "cond")
 		}
-
-		lbody := prev.label()
-		lend := prev.label()
 
 		scond.add(ir.BCond{
 			Expr:  condExpr,
 			Cond:  cond,
 			Label: lbody,
 		})
-
-		scond.add(ir.B{Label: lend})
-
-		sbody := scond.nextScope(lbody, 1, scond)
-		scond.prev = append(scond.prev, sbody)
-
-		sbody, err = c.compileBlock(ctx, sbody, x.Body)
-		if err != nil {
-			return nil, errors.Wrap(err, "body")
-		}
-
-		sbody.add(ir.B{Label: lcond})
-
-		for def, id := range scond.in {
-			res := sbody.findVar(def, sbody)
-			if res == id {
-				continue
-			}
-
-			phi := scond.Exprs[id].(ir.Phi)
-			phi = append(phi, res)
-			scond.Exprs[id] = phi
-		}
-
-		send := prev.nextScope(lend, 0, scond)
-
-		return send, nil
-	} else {
-		lend := prev.label()
-
-		lbody := prev.label()
-		prev.add(ir.B{Label: lbody})
-
-		sbody := prev.nextScope(lbody, 1, prev)
-
-		sbody.varcb = func(s *Scope, def int) ir.Expr {
-			id := s.prev[0].findVar(def, s)
-
-			phi := ir.Phi{id}
-			res := s.addphi(phi)
-
-			s.in[def] = res
-
-			return res
-		}
-
-		sbodyEnd, err := c.compileBlock(ctx, sbody, x.Body)
-		if err != nil {
-			return nil, errors.Wrap(err, "body")
-		}
-
-		sbodyEnd.branchTo(sbody)
-		sbodyEnd.deadend = true
-
-		for def, id := range sbody.in {
-			res := sbodyEnd.findVar(def, nil)
-			if res == -1 {
-				panic(def)
-			}
-			if res == id {
-				continue
-			}
-
-			phi := sbody.Exprs[id].(ir.Phi)
-			phi = append(phi, res)
-			sbody.Exprs[id] = phi
-		}
-
-		send := prev.nextScope(lend, 0, sbodyEnd)
-
-		return send, nil
 	}
+
+	scond.add(ir.B{Label: lend})
+
+	// body
+
+	sbodyEnd, err := c.compileBlock(ctx, sbody, x.Body)
+	if err != nil {
+		return nil, errors.Wrap(err, "body")
+	}
+
+	sbodyEnd.add(ir.B{Label: lcond})
+
+	return send, nil
 }
 
 func (c *Front) compileCond(ctx context.Context, s *Scope, e ast.Expr) (cc ir.Cond, id ir.Expr, err error) {
@@ -674,6 +607,7 @@ func (par *Scope) nextScope(lab ir.Label, d int, prev ...*Scope) *Scope {
 }
 
 func (s *Scope) branchTo(to *Scope) {
+	s.deadend = true
 	s.add(ir.B{Label: to.idlabel()})
 
 	to.prev = append(to.prev, s)
@@ -688,9 +622,28 @@ func (s *Scope) ret(ids ...ir.Expr) {
 
 	// TODO
 	s.retvals = ids
-	s.deadend = true
 
 	s.branchTo(s.exit)
+}
+
+func (s *Scope) doBreak() {
+	d := s.depth
+
+	for s.brea == nil || s.depth > d {
+		s = s.prev[0]
+	}
+
+	s.branchTo(s.brea)
+}
+
+func (s *Scope) doContinue() {
+	d := s.depth
+
+	for s.cont == nil || s.depth > d {
+		s = s.prev[0]
+	}
+
+	s.branchTo(s.cont)
 }
 
 func (s *Scope) ptr() uintptr {
@@ -770,21 +723,27 @@ func (s *Scope) findValue(name string, d int) (id ir.Expr) {
 		return -1
 	}
 
-	return s.findVar(def, s)
+	return s.findVar(def, nil)
 }
 
-func (s *Scope) findVar(def int, src *Scope) (id ir.Expr) {
-	if src == nil {
-		src = s
-	}
-
-	if s.deadend && s != src {
+func (s *Scope) findVar(def int, visited visitSet) (id ir.Expr) {
+	if s.deadend && visited != nil {
 		return -1
 	}
 
+	if visited == nil {
+		visited = make(visitSet)
+	}
+
+	if _, ok := visited[s]; ok {
+		return -2
+	}
+
+	visited[s] = struct{}{}
+
 	if tlog.If("findVar") {
 		defer func() {
-			tlog.Printw("find var", "p", s.ptr(), "lab", s.idlabel(), "d", s.depth, "def", def, "src", src.ptr(), "id", id, "from", loc.Callers(1, 3))
+			tlog.Printw("find var", "p", s.ptr(), "lab", s.idlabel(), "d", s.depth, "def", def, "id", id, "from", loc.Callers(1, 3))
 		}()
 	}
 
@@ -798,17 +757,67 @@ func (s *Scope) findVar(def int, src *Scope) (id ir.Expr) {
 		return id
 	}
 
-	if s.varcb != nil {
-		return s.varcb(s, def)
+	if s.delayphi {
+		id := s.addphi(ir.Phi{})
+
+		s.in[def] = id
+
+		return id
 	}
 
 	switch len(s.prev) {
 	case 0:
 		return -1
 	case 1:
-		return s.prev[0].findVar(def, src)
+		return s.prev[0].findVar(def, visited)
 	default:
+	}
+
+	phi := s.findMerge(def, visited)
+	id = s.addphi(phi)
+
+	s.in[def] = id
+
+	return id
+}
+
+func (s *Scope) findMerge(def int, visited visitSet) ir.Phi {
+	var phi ir.Phi
+
+prevs:
+	for _, p := range s.prev {
+		sub := p.findVar(def, visited)
+		if sub == -2 {
+			continue
+		}
+		if sub == -1 {
+			panic(def)
+		}
+
+		for _, x := range phi {
+			if sub == x {
+				continue prevs
+			}
+		}
+
+		phi = append(phi, sub)
+	}
+
+	if len(phi) == 0 {
 		panic(def)
+	}
+
+	return phi
+}
+
+func (s *Scope) fixPhi() {
+	for def, id := range s.in {
+		x := s.Exprs[id].(ir.Phi)
+		if len(x) != 0 {
+			continue
+		}
+
+		s.Exprs[id] = s.findMerge(def, nil)
 	}
 }
 
