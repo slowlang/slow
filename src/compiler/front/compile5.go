@@ -100,6 +100,7 @@ func (c *Front) compileFunc(ctx context.Context, par *Scope, fn *ast.FuncDecl) (
 	}
 
 	par.Funcs = append(par.Funcs, f)
+	par.allScopes = par.allScopes[:0]
 
 	tlog.Printw("compile func", "name", f.Name)
 
@@ -233,6 +234,8 @@ func (c *Front) compileFunc(ctx context.Context, par *Scope, fn *ast.FuncDecl) (
 
 		f.Code = append(f.Code, s.code...)
 	}
+
+	tlog.Printw("function scopes", "name", f.Name)
 
 	pr(s.exit)
 

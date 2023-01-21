@@ -6,6 +6,7 @@ import (
 	"sort"
 
 	"github.com/nikandfor/errors"
+	"github.com/nikandfor/loc"
 	"github.com/nikandfor/tlog"
 	"github.com/slowlang/slow/src/compiler/bitmap"
 	"github.com/slowlang/slow/src/compiler/ir"
@@ -129,12 +130,27 @@ func (c *Compiler) fixFunc(ctx context.Context, p *pkgContext, f *ir.Func) (err 
 	inserted := 0
 
 	expr := func(i int) (id ir.Expr, x any) {
+		if i < 0 {
+			return -1, nil
+		}
+
 		id = f.Code[i]
 		x = p.Exprs[id]
 		return
 	}
 
-	insert := func(i int, xxx ...any) {
+	insert := func(i int, xxx ...any) int {
+		if tlog.If("dump") {
+			tlog.Printw("function before fix", "name", f.Name)
+
+			for i, id := range f.Code {
+				x := p.Exprs[id]
+
+				tlog.Printw("code", "i", i, "id", id, "typ", tlog.NextIsType, x, "val", x)
+			}
+		}
+		tlog.Printw("insert fix", "at", i, "insert", xxx, "from", loc.Caller(1))
+
 		f.Code = append(f.Code, make([]ir.Expr, len(xxx))...)
 		copy(f.Code[i+len(xxx):], f.Code[i:])
 
@@ -144,17 +160,38 @@ func (c *Compiler) fixFunc(ctx context.Context, p *pkgContext, f *ir.Func) (err 
 		}
 
 		inserted += len(xxx)
+
+		return len(xxx)
 	}
 
-	for i, id := range f.Code {
+	insertIDs := func(i int, xxx ...ir.Expr) int {
+		if tlog.If("dump") {
+			tlog.Printw("function before fix", "name", f.Name)
+
+			for i, id := range f.Code {
+				x := p.Exprs[id]
+
+				tlog.Printw("code", "i", i, "id", id, "typ", tlog.NextIsType, x, "val", x)
+			}
+		}
+		tlog.Printw("insert fix", "at", i, "insert", xxx, "from", loc.Caller(1))
+
+		f.Code = append(f.Code, make([]ir.Expr, len(xxx))...)
+		copy(f.Code[i+len(xxx):], f.Code[i:])
+
+		inserted += copy(f.Code[i:], xxx)
+
+		return len(xxx)
+	}
+
+	_ = insertIDs
+
+	for i := 0; i < len(f.Code); i++ {
+		id := f.Code[i]
 		x := p.Exprs[id]
 
 		switch x := x.(type) {
 		case ir.Label:
-			if i == 0 {
-				break
-			}
-
 			_, px := expr(i - 1)
 
 			if _, ok := px.(ir.B); !ok {
@@ -162,27 +199,17 @@ func (c *Compiler) fixFunc(ctx context.Context, p *pkgContext, f *ir.Func) (err 
 			}
 		case ir.Call:
 			break
-			lab := p.label()
-
-			l := []any{
-				ir.B{Label: lab},
-				lab,
-			}
-
-			insert(i, l...)
-
-			i += len(l) - 1
 		default:
 		}
 	}
 
 	if tlog.If("dump") {
-		tlog.Printw("function fixed", "inserted", inserted)
+		tlog.Printw("function fixed", "name", f.Name, "inserted", inserted)
 
-		for _, id := range f.Code {
+		for i, id := range f.Code {
 			x := p.Exprs[id]
 
-			tlog.Printw("code", "id", id, "typ", tlog.NextIsType, x, "val", x)
+			tlog.Printw("code", "i", i, "id", id, "typ", tlog.NextIsType, x, "val", x)
 		}
 	}
 
@@ -224,33 +251,35 @@ func (c *Compiler) analyzeFunc(ctx context.Context, p *pkgContext, f *ir.Func) (
 		}
 	}
 
-	p.loop = map[ir.Expr]int{}
+	/*
+		p.loop = map[ir.Expr]int{}
 
-	for i, id := range f.Code {
-		x := p.Exprs[id]
-		l := ir.Label(-1)
+		for i, id := range f.Code {
+			x := p.Exprs[id]
+			l := ir.Label(-1)
 
-		switch x := x.(type) {
-		case ir.B:
-			l = x.Label
-		case ir.BCond:
-			l = x.Label
+			switch x := x.(type) {
+			case ir.B:
+				l = x.Label
+			case ir.BCond:
+				l = x.Label
+			}
+
+			if l < 0 {
+				continue
+			}
+
+			for j := l2p[l]; j <= i; j++ {
+				p.loop[f.Code[j]]++
+			}
 		}
 
-		if l < 0 {
-			continue
+		for _, m := range p.loop {
+			if m > p.loopmax {
+				p.loopmax = m
+			}
 		}
-
-		for j := l2p[l]; j <= i; j++ {
-			p.loop[f.Code[j]]++
-		}
-	}
-
-	for _, m := range p.loop {
-		if m > p.loopmax {
-			p.loopmax = m
-		}
-	}
+	*/
 
 	return nil
 }
@@ -678,6 +707,23 @@ func (c *Compiler) colorGraph(ctx context.Context, p *pkgContext, f *ir.Func) (e
 			want[p] = Reg(i)
 		}
 
+		for i := 0; i < len(f.Code); i++ {
+			id := f.Code[i]
+			x := p.Exprs[id]
+
+			if x, ok := x.(ir.Out); ok {
+				want[id] = Reg(x)
+			}
+
+			if x, ok := x.(ir.Call); ok {
+				for i, a := range x.In {
+					want[a] = Reg(i)
+				}
+
+				want[id] = 0
+			}
+		}
+
 		// TODO: can we split here?
 		splitRange(0, len(q), func(id ir.Expr) bool {
 			_, ok := want[id]
@@ -719,7 +765,7 @@ func (c *Compiler) colorGraph(ctx context.Context, p *pkgContext, f *ir.Func) (e
 		}
 	}
 
-	tlog.Printw("registers allocated")
+	tlog.Printw("registers allocated", "name", f.Name)
 
 	for _, id := range f.Code {
 		x := p.Exprs[id]
@@ -729,7 +775,7 @@ func (c *Compiler) colorGraph(ctx context.Context, p *pkgContext, f *ir.Func) (e
 			reg = r
 		}
 
-		tlog.Printw("code", "bb", p.i2b[id], "loop", p.loop[id], "id", id, "typ", tlog.NextIsType, x, "val", x, "reg", reg, "slots", p.slots[id])
+		tlog.Printw("code", "bb", p.i2b[id], "id", id, "typ", tlog.NextIsType, x, "val", x, "reg", reg, "slots", p.slots[id])
 	}
 
 	return nil
