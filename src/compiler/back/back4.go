@@ -161,6 +161,7 @@ func (c *Compiler) fixFunc(ctx context.Context, p *pkgContext, f *ir.Func) (err 
 				insert(i, ir.B{Label: x})
 			}
 		case ir.Call:
+			break
 			lab := p.label()
 
 			l := []any{
@@ -577,10 +578,14 @@ func (c *Compiler) colorGraph(ctx context.Context, p *pkgContext, f *ir.Func) (e
 	}
 
 	findV := func(i int) ir.Expr {
+		sort.SliceStable(q[i:i+l[i]], func(l, r int) bool {
+			return phi[q[i+l]].Size() > phi[q[i+r]].Size()
+		})
+
 		return q[i]
 	}
 
-	sortRange := func(s, e int, left func(ir.Expr) bool) {
+	splitRange := func(s, e int, left func(ir.Expr) bool) {
 		//	tlog.Printw("sort range", "v", v, "s", s, "e", e, "of", len(q), "edges", edges[v])
 		i := s
 		j := e
@@ -607,10 +612,10 @@ func (c *Compiler) colorGraph(ctx context.Context, p *pkgContext, f *ir.Func) (e
 		}
 	}
 
-	sortAdjacent := func(v ir.Expr, s, e int) {
+	splitAdjacent := func(v ir.Expr, s, e int) {
 		d := p.edges[v]
 
-		sortRange(s, e, func(id ir.Expr) bool {
+		splitRange(s, e, func(id ir.Expr) bool {
 			return d.IsSet(int(id))
 		})
 	}
@@ -633,9 +638,11 @@ func (c *Compiler) colorGraph(ctx context.Context, p *pkgContext, f *ir.Func) (e
 		available := all.AndNotCp(used)
 
 		var reg Reg = -1
+		var wanted any = tlog.None
 
 		if r, ok := want[id]; ok && available.IsSet(int(r)) {
 			reg = r
+			wanted = r
 		}
 
 		var walked bitmap.Big
@@ -655,7 +662,7 @@ func (c *Compiler) colorGraph(ctx context.Context, p *pkgContext, f *ir.Func) (e
 			panic(id)
 		}
 
-		tlog.Printw("set color", "id", id, "reg", reg, "used", used, "walked", walked, "available", available)
+		tlog.Printw("choose color", "id", id, "reg", reg, "used", used, "wanted", wanted, "walked", walked, "available", available)
 
 		p.regs[id] = reg
 	}
@@ -671,17 +678,12 @@ func (c *Compiler) colorGraph(ctx context.Context, p *pkgContext, f *ir.Func) (e
 			want[p] = Reg(i)
 		}
 
-		sortRange(0, len(q), func(id ir.Expr) bool {
+		// TODO: can we split here?
+		splitRange(0, len(q), func(id ir.Expr) bool {
 			_, ok := want[id]
 
 			return ok
 		})
-
-		for left := 0; left < len(q); left += l[left] {
-			sort.SliceStable(q[left:left+l[left]], func(i, j int) bool {
-				return phi[q[left+i]].Size() > phi[q[left+j]].Size()
-			})
-		}
 	}
 
 	i := 0
@@ -710,7 +712,7 @@ func (c *Compiler) colorGraph(ctx context.Context, p *pkgContext, f *ir.Func) (e
 			e := j + l[j]
 
 			if j-e != 1 {
-				sortAdjacent(id, j, e)
+				splitAdjacent(id, j, e)
 			}
 
 			j = e
