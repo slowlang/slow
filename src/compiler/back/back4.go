@@ -38,6 +38,8 @@ type (
 		regs   map[ir.Expr]Reg
 		phifix map[int]map[int][][2]Reg // to -> from -> []{to_reg, from_reg}
 
+		argRegs Reg
+
 		lab ir.Label
 	}
 
@@ -52,6 +54,7 @@ func (c *Compiler) CompilePackage(ctx context.Context, a Arch, b []byte, pkg *ir
 	p := &pkgContext{
 		Arch:    a,
 		Package: pkg,
+		argRegs: 8,
 	}
 
 	for _, x := range pkg.Exprs {
@@ -535,6 +538,9 @@ func (c *Compiler) buildGraph(ctx context.Context, p *pkgContext, f *ir.Func) (e
 func (c *Compiler) colorGraph(ctx context.Context, p *pkgContext, f *ir.Func) (err error) {
 	p.regs = map[ir.Expr]Reg{}
 
+	edges := make(map[ir.Expr]bitmap.Big)
+	pregs := map[ir.Expr]Reg{}
+
 	var all bitmap.Big
 
 	all.FillSet(0, 12)
@@ -643,6 +649,7 @@ func (c *Compiler) colorGraph(ctx context.Context, p *pkgContext, f *ir.Func) (e
 
 	splitAdjacent := func(v ir.Expr, s, e int) {
 		d := p.edges[v]
+		d = d.OrCopy(edges[v])
 
 		splitRange(s, e, func(id ir.Expr) bool {
 			return d.IsSet(int(id))
@@ -656,29 +663,39 @@ func (c *Compiler) colorGraph(ctx context.Context, p *pkgContext, f *ir.Func) (e
 
 		var used bitmap.Big
 
-		p.edges[id].Range(func(x int) bool {
+		ee := p.edges[id]
+		ee = ee.OrCopy(edges[id])
+
+		ee.Range(func(x int) bool {
 			if r, ok := p.regs[ir.Expr(x)]; ok {
+				used.Set(int(r))
+			}
+
+			if r, ok := pregs[ir.Expr(x)]; ok {
 				used.Set(int(r))
 			}
 
 			return true
 		})
 
-		available := all.AndNotCp(used)
+		available := all.AndNotCopy(used)
 
 		var reg Reg = -1
 		var wanted any = tlog.None
 
-		if r, ok := want[id]; ok && available.IsSet(int(r)) {
-			reg = r
+		if r, ok := want[id]; ok {
 			wanted = r
+
+			if available.IsSet(int(r)) {
+				reg = r
+			}
 		}
 
 		var walked bitmap.Big
 
 		if reg == -1 {
 			walked = walk(id, nil)
-			want := available.AndCp(walked)
+			want := available.AndCopy(walked)
 
 			reg = Reg(want.First())
 		}
@@ -696,6 +713,45 @@ func (c *Compiler) colorGraph(ctx context.Context, p *pkgContext, f *ir.Func) (e
 		p.regs[id] = reg
 	}
 
+	// reserve registers
+
+	base := len(p.Exprs)
+
+	xedges := func(x, y int) {
+		q := edges[ir.Expr(x)]
+		q.Set(y)
+		edges[ir.Expr(x)] = q
+
+		q = edges[ir.Expr(y)]
+		q.Set(x)
+		edges[ir.Expr(y)] = q
+	}
+
+	for _, id := range f.Code {
+		x := p.Exprs[id]
+
+		switch x.(type) {
+		case ir.Call:
+			p.slots[id].Range(func(x int) bool {
+				if x == int(id) {
+					return true
+				}
+
+				for i := 0; i < int(p.argRegs); i++ {
+					xedges(x, base+i)
+				}
+
+				return true
+			})
+		}
+	}
+
+	for i := 0; i < int(p.argRegs); i++ {
+		pregs[ir.Expr(base+i)] = Reg(i)
+	}
+
+	tlog.Printw("reserved edges", "base", base, "reserve", edges, "pregs", pregs)
+
 	// prealloc
 
 	{
@@ -707,8 +763,7 @@ func (c *Compiler) colorGraph(ctx context.Context, p *pkgContext, f *ir.Func) (e
 			want[p] = Reg(i)
 		}
 
-		for i := 0; i < len(f.Code); i++ {
-			id := f.Code[i]
+		for _, id := range f.Code {
 			x := p.Exprs[id]
 
 			if x, ok := x.(ir.Out); ok {
@@ -765,7 +820,7 @@ func (c *Compiler) colorGraph(ctx context.Context, p *pkgContext, f *ir.Func) (e
 		}
 	}
 
-	tlog.Printw("registers allocated", "name", f.Name)
+	tlog.Printw("registers allocated", "name", f.Name, "in", f.In, "out", f.Out)
 
 	for _, id := range f.Code {
 		x := p.Exprs[id]
@@ -784,6 +839,44 @@ func (c *Compiler) colorGraph(ctx context.Context, p *pkgContext, f *ir.Func) (e
 func (c *Compiler) fixPhi(ctx context.Context, p *pkgContext, f *ir.Func) (err error) {
 	p.phifix = map[int]map[int][][2]Reg{}
 
+	findFromB := func(dstid, xx ir.Expr) int {
+		lab := ir.Label(-1)
+
+		for _, id := range f.Code {
+			x := p.Exprs[id]
+			if l, ok := x.(ir.Label); ok {
+				lab = l
+			}
+
+			if id == dstid {
+				break
+			}
+		}
+
+		for i, id := range f.Code {
+			if id != xx {
+				continue
+			}
+
+			for _, id := range f.Code[i:] {
+				x := p.Exprs[id]
+
+				switch x := x.(type) {
+				case ir.BCond:
+					if x.Label == lab {
+						return p.i2b[id]
+					}
+				case ir.B:
+					if x.Label == lab {
+						return p.i2b[id]
+					}
+				}
+			}
+		}
+
+		panic(xx)
+	}
+
 	for id, x := range p.phi {
 		reg := p.regs[id]
 
@@ -797,7 +890,7 @@ func (c *Compiler) fixPhi(ctx context.Context, p *pkgContext, f *ir.Func) (err e
 			}
 
 			toB := p.i2b[id]
-			fromB := p.i2b[xx]
+			fromB := findFromB(id, xx)
 
 			if p.phifix[toB] == nil {
 				p.phifix[toB] = map[int][][2]Reg{}
@@ -844,14 +937,31 @@ func (c *Compiler) codegenFunc(ctx context.Context, b []byte, p *pkgContext, f *
 		return p.regs[id]
 	}
 
+	maxreg := Reg(0)
+
+	for _, reg := range p.regs {
+		if reg > maxreg {
+			maxreg = reg
+		}
+	}
+
+	if maxreg&1 == 1 {
+		maxreg++
+	}
+
 	b = fmt.Appendf(b, `
 .global _%v
 .align 4
 _%[1]v:
 	STP     FP, LR, [SP, #-16]!
 	MOV     FP, SP
-
 `, f.Name)
+
+	for reg := p.argRegs; reg < maxreg; reg += 2 {
+		b = fmt.Appendf(b, "	STP     X%d, X%d, [SP, #-16]!\n", reg, reg+1)
+	}
+
+	b = append(b, '\n')
 
 	for _, id := range f.Code {
 		x := p.Exprs[id]
@@ -891,7 +1001,15 @@ _%[1]v:
 			b = fmt.Appendf(b, "%v:\n", labelName(x))
 		case ir.Phi:
 		case ir.Call:
-			b = fmt.Appendf(b, "	// args ")
+			for i, id := range x.In {
+				if reg(id) == Reg(i) {
+					continue
+				}
+
+				b = fmt.Appendf(b, "	MOV	X%d, X%d	// func arg %d\n", i, reg(id), i)
+			}
+
+			b = fmt.Appendf(b, "	BL	_%v	// func call  ", x.Func)
 
 			for i, id := range x.In {
 				if i != 0 {
@@ -901,11 +1019,11 @@ _%[1]v:
 				b = fmt.Appendf(b, "%d (X%d)", id, reg(id))
 			}
 
-			b = fmt.Appendf(b, "\n")
+			b = fmt.Appendf(b, " -> %d (X%d)\n", id, reg(id))
 
-			b = fmt.Appendf(b, "	BL	_%v	// expr %d\n", x.Func, id)
-
-			b = fmt.Appendf(b, "	// result %d (X%d)\n", id, reg(id))
+			if r := reg(id); r != 0 {
+				b = fmt.Appendf(b, "	MOV	X%d, X%d	// func res %d fix\n", reg(id), 0, 0)
+			}
 		default:
 			panic(x)
 		}
@@ -915,8 +1033,13 @@ _%[1]v:
 		b = fmt.Appendf(b, "	// reg %d  res %d  expr %d\n", reg(id), i, id)
 	}
 
-	b = fmt.Appendf(b, `
-	LDP     FP, LR, [SP], #16
+	b = append(b, '\n')
+
+	for reg := maxreg - 2; reg >= p.argRegs; reg -= 2 {
+		b = fmt.Appendf(b, "	LDP     X%d, X%d, [SP], #16\n", reg, reg+1)
+	}
+
+	b = fmt.Appendf(b, `	LDP     FP, LR, [SP], #16
 	RET
 `)
 

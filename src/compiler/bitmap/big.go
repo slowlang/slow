@@ -61,6 +61,12 @@ func (s *Big) Or(x Big) {
 	}
 }
 
+func (s *Big) OrCopy(x Big) Big {
+	cp := s.Copy()
+	cp.Or(x)
+	return cp
+}
+
 func (s Big) And(x Big) {
 	for i, x := range x.b {
 		if i == len(s.b) {
@@ -71,7 +77,7 @@ func (s Big) And(x Big) {
 	}
 }
 
-func (s Big) AndCp(x Big) Big {
+func (s Big) AndCopy(x Big) Big {
 	cp := s.Copy()
 	cp.And(x)
 
@@ -88,7 +94,7 @@ func (s Big) AndNot(x Big) {
 	}
 }
 
-func (s Big) AndNotCp(x Big) Big {
+func (s Big) AndNotCopy(x Big) Big {
 	cp := s.Copy()
 	cp.AndNot(x)
 

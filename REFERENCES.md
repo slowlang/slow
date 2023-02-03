@@ -19,8 +19,8 @@ What I cannot create, I do not understand.
 
 ## Papers
 
-* *Nico Reissmann, Jan Christian Meyer, Helge Bahmann, and Magnus Sj¨alander* - RVSDG: An Intermediate Representation for Optimizing Compilers ([arxiv.org](https://arxiv.org/pdf/1912.05036.pdf))
 * *Sebastian Hack, Daniel Grund, and Gerhard Goos* - Register Allocation for Programs in SSA-Form ([compilers.cs.uni-saarland.de](https://compilers.cs.uni-saarland.de/papers/ssara.pdf))
+* *Nico Reissmann, Jan Christian Meyer, Helge Bahmann, and Magnus Sj¨alander* - RVSDG: An Intermediate Representation for Optimizing Compilers ([arxiv.org](https://arxiv.org/pdf/1912.05036.pdf))
 
 ## Articles
 
