@@ -16,6 +16,8 @@ type (
 		Out []Expr
 
 		Code []Expr
+
+		ABI ABI
 	}
 
 	Param struct {
@@ -30,6 +32,8 @@ type (
 	Out  int
 
 	Zero struct{}
+
+	ABI int
 
 	Add struct {
 		L, R Expr
@@ -47,10 +51,16 @@ type (
 		L, R Expr
 	}
 
+	Index struct {
+		X, I Expr
+	}
+
 	Call struct {
 		Func string
 
 		In []Expr
+
+		ABI ABI
 	}
 
 	Label int

@@ -178,6 +178,29 @@ func (c *Front) compileFunc(ctx context.Context, par *Scope, fn *ast.FuncDecl) (
 	done := map[*Scope]struct{}{}
 
 	var pr func(s *Scope)
+
+	pr = func(s *Scope) {
+		if s == nil {
+			return
+		}
+
+		if _, ok := done[s]; ok {
+			return
+		}
+
+		done[s] = struct{}{}
+
+		for _, p := range s.prev {
+			pr(p)
+		}
+
+		s.fixPhi()
+	}
+
+	pr(s.exit)
+
+	done = map[*Scope]struct{}{}
+
 	pr = func(s *Scope) {
 		if s == nil {
 			return
@@ -207,8 +230,6 @@ func (c *Front) compileFunc(ctx context.Context, par *Scope, fn *ast.FuncDecl) (
 
 		tlog.Printw("scope", args...)
 		//	tlog.Printw("scope", "p", s.ptr(), "prev", s.prevPtr(), "lab", s.idlabel(), "d", s.depth, "in", s.in, "def", s.def, "vars", s.vars, "from", tlog.FormatNext("%x"), s.from)
-
-		s.fixPhi()
 
 		if s.id >= 0 {
 			x := s.Exprs[s.id]
@@ -433,8 +454,6 @@ func (c *Front) compileFor(ctx context.Context, prev *Scope, x *ast.ForStmt) (_ 
 		scond = prev.nextScope(lcond, 1, prev)
 		sbody = prev.nextScope(lbody, 2, scond)
 		send = prev.nextScope(lend, 0, scond)
-
-		//	scond.appendPrev(sbody)
 	} else {
 		scond = prev.nextScope(lcond, 1, prev)
 		sbody = scond
@@ -475,8 +494,6 @@ func (c *Front) compileFor(ctx context.Context, prev *Scope, x *ast.ForStmt) (_ 
 		})
 
 		scond.branchTo(send)
-		//	} else {
-		//		scond.branchTo(sbody)
 	}
 
 	// body
@@ -569,6 +586,23 @@ func (c *Front) compileExpr(ctx context.Context, s *Scope, e ast.Expr) (id ir.Ex
 			}
 		default:
 			panic(e.Op)
+		}
+
+		id = s.add(op)
+	case *ast.IndexExpr:
+		x, err := c.compileExpr(ctx, s, e.X)
+		if err != nil {
+			return -1, errors.Wrap(err, "index base")
+		}
+
+		idx, err := c.compileExpr(ctx, s, e.Index)
+		if err != nil {
+			return -1, errors.Wrap(err, "index base")
+		}
+
+		op := ir.Index{
+			X: x,
+			I: idx,
 		}
 
 		id = s.add(op)

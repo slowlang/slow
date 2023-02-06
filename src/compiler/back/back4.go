@@ -38,7 +38,7 @@ type (
 		regs   map[ir.Expr]Reg
 		phifix map[int]map[int][][2]Reg // to -> from -> []{to_reg, from_reg}
 
-		argRegs Reg
+		calleeSaved Reg
 
 		lab ir.Label
 	}
@@ -54,7 +54,8 @@ func (c *Compiler) CompilePackage(ctx context.Context, a Arch, b []byte, pkg *ir
 	p := &pkgContext{
 		Arch:    a,
 		Package: pkg,
-		argRegs: 8,
+
+		calleeSaved: 19,
 	}
 
 	for _, x := range pkg.Exprs {
@@ -327,8 +328,8 @@ func (c *Compiler) buildGraph(ctx context.Context, p *pkgContext, f *ir.Func) (e
 			d.Set(int(id))
 
 			switch x := x.(type) {
-			case ir.Imm, ir.Args:
-			case ir.Cmp, ir.Add, ir.Sub, ir.Mul:
+			case ir.Imm, ir.Args, ir.Out:
+			case ir.Cmp, ir.Add, ir.Sub, ir.Mul, ir.Index:
 			case ir.Label:
 				d.Or(labelhave[x])
 			case ir.B:
@@ -401,7 +402,7 @@ func (c *Compiler) buildGraph(ctx context.Context, p *pkgContext, f *ir.Func) (e
 			}
 
 			switch x := x.(type) {
-			case ir.Imm, ir.Args:
+			case ir.Imm, ir.Args, ir.Out:
 			case ir.Label:
 				labelneed[x] = d.Copy()
 			case ir.Phi:
@@ -419,6 +420,8 @@ func (c *Compiler) buildGraph(ctx context.Context, p *pkgContext, f *ir.Func) (e
 				dset(x.L, x.R)
 			case ir.Mul:
 				dset(x.L, x.R)
+			case ir.Index:
+				dset(x.X, x.I)
 			case ir.Call:
 				dset(x.In...)
 			default:
@@ -543,7 +546,8 @@ func (c *Compiler) colorGraph(ctx context.Context, p *pkgContext, f *ir.Func) (e
 
 	var all bitmap.Big
 
-	all.FillSet(0, 12)
+	all.FillSet(0, 28)
+	all.Clear(18) // apple says don't use
 
 	q := make([]ir.Expr, 0, len(f.Code))
 
@@ -704,11 +708,11 @@ func (c *Compiler) colorGraph(ctx context.Context, p *pkgContext, f *ir.Func) (e
 			reg = Reg(available.First())
 		}
 
+		tlog.Printw("choose color", "id", id, "reg", reg, "used", used, "wanted", wanted, "walked", walked, "available", available)
+
 		if reg == -1 {
 			panic(id)
 		}
-
-		tlog.Printw("choose color", "id", id, "reg", reg, "used", used, "wanted", wanted, "walked", walked, "available", available)
 
 		p.regs[id] = reg
 	}
@@ -737,7 +741,7 @@ func (c *Compiler) colorGraph(ctx context.Context, p *pkgContext, f *ir.Func) (e
 					return true
 				}
 
-				for i := 0; i < int(p.argRegs); i++ {
+				for i := 0; i < int(p.calleeSaved); i++ {
 					xedges(x, base+i)
 				}
 
@@ -746,7 +750,7 @@ func (c *Compiler) colorGraph(ctx context.Context, p *pkgContext, f *ir.Func) (e
 		}
 	}
 
-	for i := 0; i < int(p.argRegs); i++ {
+	for i := 0; i < int(p.calleeSaved); i++ {
 		pregs[ir.Expr(base+i)] = Reg(i)
 	}
 
@@ -954,11 +958,13 @@ func (c *Compiler) codegenFunc(ctx context.Context, b []byte, p *pkgContext, f *
 .align 4
 _%[1]v:
 	STP     FP, LR, [SP, #-16]!
-	MOV     FP, SP
 `, f.Name)
+	//	MOV     FP, SP
 
-	for reg := p.argRegs; reg < maxreg; reg += 2 {
-		b = fmt.Appendf(b, "	STP     X%d, X%d, [SP, #-16]!\n", reg, reg+1)
+	stReg := p.calleeSaved
+
+	for ; stReg < maxreg; stReg += 2 {
+		b = fmt.Appendf(b, "	STP     X%d, X%d, [SP, #-16]!\n", stReg, stReg+1)
 	}
 
 	b = append(b, '\n')
@@ -969,6 +975,7 @@ _%[1]v:
 		switch x := x.(type) {
 		case ir.Args:
 			b = fmt.Appendf(b, "	// reg %d  args %d  expr %d\n", reg(id), x, id)
+		case ir.Out:
 		case ir.Imm:
 			b = fmt.Appendf(b, "	MOV	X%d, #%d	// expr %d\n", reg(id), x, id)
 		case ir.Add:
@@ -977,6 +984,8 @@ _%[1]v:
 			b = fmt.Appendf(b, "	SUB	X%d, X%d, X%d	// expr %d\n", reg(id), reg(x.L), reg(x.R), id)
 		case ir.Mul:
 			b = fmt.Appendf(b, "	MUL	X%d, X%d, X%d	// expr %d\n", reg(id), reg(x.L), reg(x.R), id)
+		case ir.Index:
+			b = fmt.Appendf(b, "	LDR	X%d, [X%d, X%d, LSL #3]	// expr %d\n", reg(id), reg(x.X), reg(x.I), id)
 		case ir.Cmp:
 			b = fmt.Appendf(b, "	CMP	X%d, X%d	// expr %d\n", reg(x.L), reg(x.R), id)
 		case ir.B:
@@ -1035,8 +1044,8 @@ _%[1]v:
 
 	b = append(b, '\n')
 
-	for reg := maxreg - 2; reg >= p.argRegs; reg -= 2 {
-		b = fmt.Appendf(b, "	LDP     X%d, X%d, [SP], #16\n", reg, reg+1)
+	for stReg -= 2; stReg >= p.calleeSaved; stReg -= 2 {
+		b = fmt.Appendf(b, "	LDP     X%d, X%d, [SP], #16\n", stReg, stReg+1)
 	}
 
 	b = fmt.Appendf(b, `	LDP     FP, LR, [SP], #16
