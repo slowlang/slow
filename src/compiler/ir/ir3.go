@@ -31,9 +31,15 @@ type (
 	Imm  int64
 	Out  int
 
+	Data string
+
 	Zero struct{}
 
 	ABI int
+
+	Ptr struct {
+		X Expr
+	}
 
 	Add struct {
 		L, R Expr

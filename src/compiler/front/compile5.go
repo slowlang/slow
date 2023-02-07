@@ -547,6 +547,14 @@ func (c *Front) compileExpr(ctx context.Context, s *Scope, e ast.Expr) (id ir.Ex
 			}
 
 			id = s.add(ir.Imm(x))
+		case token.STRING:
+			data, err := strconv.Unquote(e.Value)
+			if err != nil {
+				panic(err)
+			}
+
+			id = s.add(ir.Data(data))
+			id = s.add(ir.Ptr{X: id})
 		default:
 			panic(e.Kind)
 		}

@@ -19,10 +19,22 @@ syntax keyword	basicTypes		string byte rune bool
 syntax keyword	standardTypes	context.Context
 syntax keyword	todo			TODO NOTE containedin=comment
 
-syntax match	intTypes		"\v<u?int\d*>"
+syntax match	intTypes		"\v<u=int\d*>"
+
+syntax cluster	Type			contains=basicTypes,standardTypes,intTypes
 
 hi def link		basicTypes		Type
 hi def link		intTypes		Type
+
+" type
+
+syntax keyword	structKeyword	struct skipwhite nextgroup=structDecl
+syntax keyword	ifaceKeyword	struct skipwhite nextgroup=ifaceDecl
+syntax region	structDecl		start="{" end="}"	contained transparent contains=@Type
+syntax region	ifaceDecl		start="{" end="}"	contained transparent contains=@Type
+
+hi def link		structKeyword	Keyword
+hi def link		ifaceKeyword	Keyword
 
 " func
 
@@ -36,7 +48,7 @@ syntax match	funcCall		"\v\i+\ze\s*\("		contained
 hi def link		funcKeywordG	Keyword
 hi def link		funcKeywordF	Keyword
 hi def link		funcDecl		Identifier
-hi def link		funcCall		Type
+hi def link		funcCall		Identifier
 "hi def link		funcArgs		Comment
 
 hi def link		funcCall		Type
@@ -59,7 +71,8 @@ hi def link		Number			Constant
 
 " strungs
 
-syntax region	stringLit		start=:": end=:": oneline
+
+syntax region	stringLit		start=:": end=:": oneline contains=@Escape
 syntax region	stringRaw		start=:`: end=:`:
 
 syntax cluster	String			contains=stringLit,stringRaw
@@ -68,6 +81,20 @@ hi def link		stringLit		String
 hi def link		stringRaw		String
 
 hi def link		String			Constant
+
+syntax match	escapeSym		:\v\\[nrtvb0"]:	contained
+syntax match	escapeX			"\v\\x\x{2}"	contained
+syntax match	escapeO			"\v\\o\o{3}"	contained
+syntax match	escapeU			"\v\\u\x{4}"	contained
+syntax match	escapeU8		"\v\\U\x{8}"	contained
+
+syntax cluster	Escape			contains=escapeSym,escapeX,escapeO,escapeU,escapeU8
+
+hi def link		escapeSym		Preproc
+hi def link		escapeX			Preproc
+hi def link		escapeO			Preproc
+hi def link		escapeU			Preproc
+hi def link		escapeU8		Preproc
 
 " comments
 
@@ -80,7 +107,7 @@ hi def link		commentol		Comment
 " block
 
 syntax region	commentedBlock	start="{" end="}"		fold contains=commentedBlock containedin=comment transparent
-syntax region	block			start="{" end="}"		fold contains=block,Keyword,@Number,@String,basicTypes,comment,commentol,funcCall
+syntax region	block			start="{" end="}"		fold contains=block,Keyword,@Number,@String,@Type,comment,commentol,funcCall,preproc
 
 " preproc
 

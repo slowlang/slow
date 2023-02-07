@@ -1,10 +1,17 @@
 package main
 
+
 func main(argc int, argv **byte) int {
+	nl := "\n"
 	i := 0
 
 	for i < argc {
 		r := write(1, argv[i], strlen(argv[i]))
+		if r < 0 {
+			return 0 - r
+		}
+
+		r := write(1, nl, strlen(nl))
 		if r < 0 {
 			return 0 - r
 		}

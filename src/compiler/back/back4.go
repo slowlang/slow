@@ -330,6 +330,8 @@ func (c *Compiler) buildGraph(ctx context.Context, p *pkgContext, f *ir.Func) (e
 			switch x := x.(type) {
 			case ir.Imm, ir.Args, ir.Out:
 			case ir.Cmp, ir.Add, ir.Sub, ir.Mul, ir.Index:
+			case ir.Data:
+			case ir.Ptr:
 			case ir.Label:
 				d.Or(labelhave[x])
 			case ir.B:
@@ -424,6 +426,9 @@ func (c *Compiler) buildGraph(ctx context.Context, p *pkgContext, f *ir.Func) (e
 				dset(x.X, x.I)
 			case ir.Call:
 				dset(x.In...)
+			case ir.Data:
+			case ir.Ptr:
+				dset(x.X)
 			default:
 				panic(x)
 			}
@@ -958,8 +963,8 @@ func (c *Compiler) codegenFunc(ctx context.Context, b []byte, p *pkgContext, f *
 .align 4
 _%[1]v:
 	STP     FP, LR, [SP, #-16]!
+	MOV     FP, SP
 `, f.Name)
-	//	MOV     FP, SP
 
 	stReg := p.calleeSaved
 
@@ -1033,6 +1038,9 @@ _%[1]v:
 			if r := reg(id); r != 0 {
 				b = fmt.Appendf(b, "	MOV	X%d, X%d	// func res %d fix\n", reg(id), 0, 0)
 			}
+		case ir.Data:
+		case ir.Ptr:
+			b = fmt.Appendf(b, "	ADR	X%d, .data.%d	// expr %d\n", reg(id), x.X, id)
 		default:
 			panic(x)
 		}
@@ -1051,6 +1059,18 @@ _%[1]v:
 	b = fmt.Appendf(b, `	LDP     FP, LR, [SP], #16
 	RET
 `)
+
+	b = append(b, '\n')
+
+	for _, id := range f.Code {
+		x := p.Exprs[id]
+
+		switch x := x.(type) {
+		case ir.Data:
+			b = fmt.Appendf(b, ".data.%d:\n	.asciz %q\n", id, x)
+		default:
+		}
+	}
 
 	return b, nil
 }
