@@ -713,7 +713,7 @@ func (c *Compiler) colorGraph(ctx context.Context, p *pkgContext, f *ir.Func) (e
 			reg = Reg(available.First())
 		}
 
-		tlog.Printw("choose color", "id", id, "reg", reg, "used", used, "wanted", wanted, "walked", walked, "available", available)
+		tlog.Printw("choose color", "id", id, "reg", reg, "used", used, "wanted", wanted, "walked", walked)
 
 		if reg == -1 {
 			panic(id)
@@ -759,7 +759,7 @@ func (c *Compiler) colorGraph(ctx context.Context, p *pkgContext, f *ir.Func) (e
 		pregs[ir.Expr(base+i)] = Reg(i)
 	}
 
-	tlog.Printw("reserved edges", "base", base, "reserve", edges, "pregs", pregs)
+	tlog.Printw("reserved edges", "base", base, "reserve", edges, "pregs_start", base, "pregs_end", base+int(p.calleeSaved))
 
 	// prealloc
 
@@ -1091,6 +1091,54 @@ func (p *pkgContext) label() ir.Label {
 
 func permutate(b []byte, l [][2]Reg) []byte {
 	b = fmt.Appendf(b, "	// permutate %v\n", l)
+
+	dst := map[Reg]Reg{} // src -> dst
+
+	for _, p := range l {
+		dst[p[1]] = p[0]
+	}
+
+	var move func(d, s, loop Reg) bool
+	move = func(d, s, loop Reg) bool {
+		if d == loop {
+			return false
+		}
+
+		if loop == -1 {
+			loop = d
+		}
+
+		defer delete(dst, s)
+
+		d2, ok := dst[d]
+		if ok {
+			ok = !move(d2, d, loop)
+		}
+
+		if !ok {
+			b = fmt.Appendf(b, "	MOV	X%d, X%d\n", d, s)
+
+			return true
+		}
+
+		if d == loop {
+			return false
+		}
+
+		b = swap(b, d, s)
+
+		return false
+	}
+
+	for _, p := range l {
+		if _, ok := dst[p[1]]; !ok {
+			continue
+		}
+
+		move(p[0], p[1], -1)
+	}
+
+	return b
 
 next:
 	for i := 0; i < len(l); i++ {
