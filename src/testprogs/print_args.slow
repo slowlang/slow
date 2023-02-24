@@ -11,7 +11,7 @@ func main(argc int, argv **byte) int {
 			return 0 - r
 		}
 
-		r := write(1, nl, strlen(nl))
+		r := write(1, nl.Ptr, nl.Len)
 		if r < 0 {
 			return 0 - r
 		}

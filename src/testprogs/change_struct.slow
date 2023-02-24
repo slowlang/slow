@@ -1,0 +1,17 @@
+package main
+
+type A struct {
+	B int
+}
+
+func main() {
+	a := &A{B: 1}
+
+	f(a)
+
+	_ = a.B
+}
+
+func f(a *A) {
+	a.B = 2
+}

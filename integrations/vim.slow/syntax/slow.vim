@@ -71,7 +71,6 @@ hi def link		Number			Constant
 
 " strungs
 
-
 syntax region	stringLit		start=:": end=:": oneline contains=@Escape
 syntax region	stringRaw		start=:`: end=:`:
 

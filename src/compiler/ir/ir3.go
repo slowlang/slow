@@ -1,12 +1,21 @@
 package ir
 
+import "github.com/slowlang/slow/src/compiler/tp"
+
 type (
 	Package struct {
 		Path string
 
+		Types []*TypeSpec
 		Funcs []*Func
 
 		Exprs []any
+	}
+
+	TypeSpec struct {
+		Name string
+
+		tp.Type
 	}
 
 	Func struct {
@@ -41,6 +50,8 @@ type (
 		X Expr
 	}
 
+	Struct []Expr
+
 	Add struct {
 		L, R Expr
 	}
@@ -59,6 +70,11 @@ type (
 
 	Index struct {
 		X, I Expr
+	}
+
+	Field struct {
+		X Expr
+		I int
 	}
 
 	Call struct {

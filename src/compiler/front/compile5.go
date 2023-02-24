@@ -12,6 +12,7 @@ import (
 	"github.com/nikandfor/loc"
 	"github.com/nikandfor/tlog"
 	"github.com/slowlang/slow/src/compiler/ir"
+	"github.com/slowlang/slow/src/compiler/tp"
 )
 
 type (
@@ -26,6 +27,8 @@ type (
 		lab        ir.Label
 
 		allScopes []*Scope
+
+		tasks map[string]any
 	}
 
 	Scope struct {
@@ -65,30 +68,69 @@ const (
 func (c *Front) Compile(ctx context.Context) (_ *ir.Package, err error) {
 	p := &pkgContext{
 		Package: &ir.Package{},
+		tasks:   map[string]any{},
 	}
 
-	p.zero = p.alloc(ir.Zero{})
-
-	s := rootScope(p)
-
 	for _, f := range c.files {
-		//	tlog.Printw("file", "f", f)
-
 		for _, d := range f.Decls {
-			err = c.compileDecl(ctx, s, d)
+			err = c.addTasks(ctx, p, d)
 			if err != nil {
 				return nil, errors.Wrap(err, "decl %T", d)
 			}
 		}
 	}
 
+	p.zero = p.alloc(ir.Zero{})
+
+	s := rootScope(p)
+
+	for name, d := range p.tasks {
+		err = c.compileTask(ctx, s, d)
+		if err != nil {
+			return nil, errors.Wrap(err, "decl %T", d)
+		}
+
+		delete(p.tasks, name)
+	}
+
 	return p.Package, nil
 }
 
-func (c *Front) compileDecl(ctx context.Context, s *Scope, d ast.Decl) (err error) {
+func (c *Front) addTasks(ctx context.Context, p *pkgContext, d ast.Decl) (err error) {
+	switch d := d.(type) {
+	case *ast.FuncDecl:
+		c.addTask(ctx, p, d.Name.Name, d)
+	case *ast.GenDecl:
+		for _, spec := range d.Specs {
+			switch d := spec.(type) {
+			case *ast.TypeSpec:
+				c.addTask(ctx, p, d.Name.Name, d)
+			default:
+				panic(d)
+			}
+		}
+	default:
+		panic(d)
+	}
+
+	return nil
+}
+
+func (c *Front) addTask(ctx context.Context, p *pkgContext, name string, task any) {
+	t, ok := p.tasks[name]
+	if ok {
+		panic(t)
+	}
+
+	p.tasks[name] = task
+}
+
+func (c *Front) compileTask(ctx context.Context, s *Scope, d any) (err error) {
 	switch d := d.(type) {
 	case *ast.FuncDecl:
 		return c.compileFunc(ctx, s, d)
+	case *ast.TypeSpec:
+		return c.compileTypeSpec(ctx, s, d)
 	default:
 		panic(d)
 	}
@@ -137,16 +179,18 @@ func (c *Front) compileFunc(ctx context.Context, par *Scope, fn *ast.FuncDecl) (
 		s.Exprs[argsStart] = ir.Args(len(f.In))
 	}
 
-	for _, p := range fn.Type.Results.List {
-		if len(p.Names) == 0 {
-			f.Out = append(f.Out, -1)
-			continue
-		}
+	if fn.Type.Results != nil {
+		for _, p := range fn.Type.Results.List {
+			if len(p.Names) == 0 {
+				f.Out = append(f.Out, -1)
+				continue
+			}
 
-		for _, name := range p.Names {
-			f.Out = append(f.Out, -1)
+			for _, name := range p.Names {
+				f.Out = append(f.Out, -1)
 
-			s.define(name.Name, s.zero)
+				s.define(name.Name, s.zero)
+			}
 		}
 	}
 
@@ -324,7 +368,7 @@ func (c *Front) compileStmt(ctx context.Context, s *Scope, x ast.Stmt) (_ *Scope
 		for i, e := range x.Lhs {
 			v, ok := e.(*ast.Ident)
 			if !ok {
-				return nil, errors.New("unsupported lexpr: %T", x.Lhs)
+				return nil, errors.New("unsupported lexpr: %T", e)
 			}
 
 			if x.Tok == token.DEFINE {
@@ -333,6 +377,30 @@ func (c *Front) compileStmt(ctx context.Context, s *Scope, x ast.Stmt) (_ *Scope
 				s.assign(v.Name, s.depth, ids[i])
 			}
 		}
+	case *ast.IncDecStmt:
+		id, err := c.compileExpr(ctx, s, x.X)
+		if err != nil {
+			return s, errors.Wrap(err, "inc expr")
+		}
+
+		v, ok := x.X.(*ast.Ident)
+		if !ok {
+			return nil, errors.New("unsupported lexpr: %T", x)
+		}
+
+		one := s.add(ir.Imm(1))
+
+		var op any
+
+		if x.Tok == token.INC {
+			op = ir.Add{L: id, R: one}
+		} else {
+			op = ir.Sub{L: id, R: one}
+		}
+
+		id = s.add(op)
+
+		s.assign(v.Name, s.depth, id)
 	case *ast.IfStmt:
 		s, err = c.compileIf(ctx, s, x)
 		if err != nil {
@@ -555,8 +623,21 @@ func (c *Front) compileExpr(ctx context.Context, s *Scope, e ast.Expr) (id ir.Ex
 
 			id = s.add(ir.Data(data))
 			id = s.add(ir.Ptr{X: id})
+			id = s.add(ir.Struct{id, s.add(ir.Imm(len(data)))})
 		default:
 			panic(e.Kind)
+		}
+	case *ast.UnaryExpr:
+		id, err = c.compileExpr(ctx, s, e.X)
+		if err != nil {
+			return -1, errors.Wrap(err, "operand")
+		}
+
+		switch e.Op {
+		case token.AND:
+			id = s.add(ir.Ptr{X: id})
+		default:
+			panic(e.Op)
 		}
 	case *ast.BinaryExpr:
 		l, err := c.compileExpr(ctx, s, e.X)
@@ -614,6 +695,31 @@ func (c *Front) compileExpr(ctx context.Context, s *Scope, e ast.Expr) (id ir.Ex
 		}
 
 		id = s.add(op)
+	case *ast.SelectorExpr:
+		x, err := c.compileExpr(ctx, s, e.X)
+		if err != nil {
+			return -1, errors.Wrap(err, "selector base")
+		}
+
+		tlog.Printw("selector expr", "x", e.X, "sel", e.Sel)
+
+		var idx int
+
+		switch e.Sel.Name {
+		case "Ptr":
+			idx = 0
+		case "Len":
+			idx = 1
+		default:
+			panic(e.Sel.Name)
+		}
+
+		op := ir.Field{
+			X: x,
+			I: idx,
+		}
+
+		id = s.add(op)
 	case *ast.CallExpr:
 		n := e.Fun.(*ast.Ident)
 
@@ -631,15 +737,104 @@ func (c *Front) compileExpr(ctx context.Context, s *Scope, e ast.Expr) (id ir.Ex
 
 		id = s.add(x)
 
-		// TODO: alloc regs for all results
-	//	for i := 1; i < len(x.Out); i++ {
-	//		s.add(ir.Out(i))
-	//	}
+		var fdef *ir.Func
+
+		for _, f := range s.pkgContext.Funcs {
+			if f.Name != n.Name {
+				continue
+			}
+
+			fdef = f
+			break
+		}
+
+		for i := 1; i < len(fdef.Out); i++ {
+			s.add(ir.Out(i))
+		}
+	case *ast.CompositeLit:
+		if e.Incomplete {
+			panic(e)
+		}
 	default:
 		panic(fmt.Sprintf("%T: %[1]v", e))
 	}
 
 	return
+}
+
+func (c *Front) compileType(ctx context.Context, s *Scope, e ast.Expr) (x tp.Type, err error) {
+	switch e := e.(type) {
+	case *ast.Ident:
+		for _, t := range s.Package.Types {
+			if t.Name == e.Name {
+				x = t.Type
+			}
+		}
+
+		if x != nil {
+			return x, nil
+		}
+
+		switch e.Name {
+		case "int":
+			x = tp.Int{Bits: 64, Signed: true}
+		default:
+			panic(e.Name)
+		}
+	case *ast.StructType:
+		if e.Incomplete {
+			panic(e)
+		}
+
+		x := tp.Struct{}
+
+		if e.Fields == nil || len(e.Fields.List) == 0 {
+			return x, nil
+		}
+
+		for _, f := range e.Fields.List {
+			ft, err := c.compileType(ctx, s, f.Type)
+			if err != nil {
+				return nil, errors.Wrap(err, "field %v", f.Type)
+			}
+
+			if len(f.Names) == 0 {
+				x.Fields = append(x.Fields, tp.StructField{
+					Name: c.baseName(ctx, f.Type),
+					Type: ft,
+				})
+			}
+
+			for _, fn := range f.Names {
+				x.Fields = append(x.Fields, tp.StructField{
+					Name: fn.Name,
+					Type: ft,
+				})
+			}
+		}
+	default:
+		panic(fmt.Sprintf("%T: %[1]v", e))
+	}
+
+	return x, nil
+}
+
+func (c *Front) baseName(ctx context.Context, tp ast.Expr) string {
+	switch tp := tp.(type) {
+	default:
+		panic(tp)
+	}
+}
+
+func (c *Front) compileTypeSpec(ctx context.Context, par *Scope, spec *ast.TypeSpec) (err error) {
+	id, err := c.compileType(ctx, par, spec.Type)
+	if err != nil {
+		return errors.Wrap(err, "type expr")
+	}
+
+	tlog.Printw("type", "name", spec.Name.Name, "id", id)
+
+	return nil
 }
 
 func rootScope(p *pkgContext) *Scope {

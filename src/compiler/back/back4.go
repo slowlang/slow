@@ -191,8 +191,7 @@ func (c *Compiler) fixFunc(ctx context.Context, p *pkgContext, f *ir.Func) (err 
 	_ = insertIDs
 
 	for i := 0; i < len(f.Code); i++ {
-		id := f.Code[i]
-		x := p.Exprs[id]
+		_, x := expr(i)
 
 		switch x := x.(type) {
 		case ir.Label:
@@ -252,6 +251,22 @@ func (c *Compiler) analyzeFunc(ctx context.Context, p *pkgContext, f *ir.Func) (
 		}
 		if _, ok := x.(ir.BCond); ok {
 			next = true
+		}
+	}
+
+	if tlog.If("cfg") {
+		tlog.Printw("function cfg", "name", f.Name)
+
+		for i, id := range f.Code {
+			x := p.Exprs[id]
+
+			switch x.(type) {
+			case ir.B, ir.BCond, ir.Label:
+			default:
+				continue
+			}
+
+			tlog.Printw("code", "i", i, "id", id, "typ", tlog.NextIsType, x, "val", x)
 		}
 	}
 
@@ -330,8 +345,7 @@ func (c *Compiler) buildGraph(ctx context.Context, p *pkgContext, f *ir.Func) (e
 			switch x := x.(type) {
 			case ir.Imm, ir.Args, ir.Out:
 			case ir.Cmp, ir.Add, ir.Sub, ir.Mul, ir.Index:
-			case ir.Data:
-			case ir.Ptr:
+			case ir.Data, ir.Ptr, ir.Struct, ir.Field:
 			case ir.Label:
 				d.Or(labelhave[x])
 			case ir.B:
@@ -428,6 +442,10 @@ func (c *Compiler) buildGraph(ctx context.Context, p *pkgContext, f *ir.Func) (e
 				dset(x.In...)
 			case ir.Data:
 			case ir.Ptr:
+				dset(x.X)
+			case ir.Struct:
+				dset(x...)
+			case ir.Field:
 				dset(x.X)
 			default:
 				panic(x)
@@ -1041,6 +1059,10 @@ _%[1]v:
 		case ir.Data:
 		case ir.Ptr:
 			b = fmt.Appendf(b, "	ADR	X%d, .data.%d	// expr %d\n", reg(id), x.X, id)
+		case ir.Struct:
+			b = fmt.Appendf(b, "	// struct expr %d  reg %d  %v\n", id, reg(id), x)
+		case ir.Field:
+			b = fmt.Appendf(b, "	// field expr %d  reg %d  %v\n", id, reg(id), x)
 		default:
 			panic(x)
 		}
