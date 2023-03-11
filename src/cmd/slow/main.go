@@ -60,10 +60,10 @@ func before(c *cli.Command) (err error) {
 
 	tlog.SetVerbosity(c.String("v"))
 
-	if w, ok := w.(tlio.TeeWriter); ok {
+	if w, ok := w.(tlio.MultiWriter); ok {
 		for _, w := range w {
 			if w, ok := w.(*tlog.ConsoleWriter); ok {
-				w.Flags &^= tlog.Ldate
+				w.Flags = tlog.Ltime | tlog.Lshortfile
 				w.LevelWidth = 1
 				w.Shortfile = 14
 				w.MessageWidth = 20

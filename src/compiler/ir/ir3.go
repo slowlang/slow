@@ -1,3 +1,5 @@
+//go:build ignore
+
 package ir
 
 import "github.com/slowlang/slow/src/compiler/tp"
@@ -6,16 +8,10 @@ type (
 	Package struct {
 		Path string
 
-		Types []*TypeSpec
+		Types []*tp.Spec
 		Funcs []*Func
 
 		Exprs []any
-	}
-
-	TypeSpec struct {
-		Name string
-
-		tp.Type
 	}
 
 	Func struct {

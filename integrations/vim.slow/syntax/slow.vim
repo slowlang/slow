@@ -14,9 +14,9 @@ set foldminlines=3 foldnestmax=3
 
 " base
 
-syntax keyword	Keyword			package if else for return var const type
+syntax keyword	Keyword			package if else for return var let const type
 syntax keyword	basicTypes		string byte rune bool
-syntax keyword	standardTypes	context.Context
+syntax keyword	standardTypes	error context.Context
 syntax keyword	todo			TODO NOTE containedin=comment
 
 syntax match	intTypes		"\v<u=int\d*>"
@@ -28,8 +28,8 @@ hi def link		intTypes		Type
 
 " type
 
-syntax keyword	structKeyword	struct skipwhite nextgroup=structDecl
-syntax keyword	ifaceKeyword	struct skipwhite nextgroup=ifaceDecl
+syntax keyword	structKeyword	struct    skipwhite nextgroup=structDecl
+syntax keyword	ifaceKeyword	interface skipwhite nextgroup=ifaceDecl
 syntax region	structDecl		start="{" end="}"	contained transparent contains=@Type
 syntax region	ifaceDecl		start="{" end="}"	contained transparent contains=@Type
 
@@ -41,8 +41,8 @@ hi def link		ifaceKeyword	Keyword
 syntax keyword	funcKeywordG	func skipwhite nextgroup=funcDecl,funcArgs
 syntax keyword	funcKeywordF	func contained containedin=block skipwhite nextgroup=funcArgs
 syntax region	funcBody		start="{" end="}"	contained skipwhite nextgroup=funcArgs transparent
-syntax region	funcArgs		start="(" end=")"	contained skipwhite nextgroup=funcDecl,funcBody
-syntax match	funcDecl		"\v\i+"				contained
+syntax region	funcArgs		start="(" end=")"	contained skipwhite nextgroup=funcDecl,funcArgs,@Type,funcBody contains=@Type
+syntax match	funcDecl		"\v\i+"				contained skipwhite nextgroup=funcArgs
 syntax match	funcCall		"\v\i+\ze\s*\("		contained
 
 hi def link		funcKeywordG	Keyword
@@ -52,6 +52,12 @@ hi def link		funcCall		Identifier
 "hi def link		funcArgs		Comment
 
 hi def link		funcCall		Type
+
+" nil
+
+syntax keyword	nilkw			nil	containedin=funcBody
+
+hi def link		nilkw			Constant
 
 " numbers
 

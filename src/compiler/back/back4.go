@@ -3,6 +3,7 @@ package back
 import (
 	"context"
 	"fmt"
+	"path"
 	"sort"
 
 	"github.com/nikandfor/errors"
@@ -66,6 +67,14 @@ func (c *Compiler) CompilePackage(ctx context.Context, a Arch, b []byte, pkg *ir
 		}
 	}
 
+	if tlog.If("dump_pkg") {
+		tlog.Printw("package", "name", path.Base(p.Path), "path", p.Path)
+
+		for id, x := range p.Exprs {
+			tlog.Printw("expr", "id", id, "typ", tlog.NextIsType, x, "val", x)
+		}
+	}
+
 	b = fmt.Appendf(b, `// package %s
 
 .global _start
@@ -80,7 +89,9 @@ _start:
 	RET
 `, p.Path)
 
-	for _, f := range p.Funcs {
+	for _, fid := range p.Funcs {
+		f := p.Exprs[fid].(*ir.Func)
+
 		b = append(b, '\n')
 
 		b, err = c.compileFunc(ctx, b, p, f)
@@ -94,6 +105,14 @@ _start:
 
 func (c *Compiler) compileFunc(ctx context.Context, b []byte, p *pkgContext, f *ir.Func) (_ []byte, err error) {
 	tlog.Printw("compile func", "name", f.Name, "in", f.In, "out", f.Out)
+
+	if tlog.If("dump_func_src") {
+		for i, id := range f.Code {
+			x := p.Exprs[id]
+
+			tlog.Printw("code", "i", i, "id", id, "typ", tlog.NextIsType, x, "val", x)
+		}
+	}
 
 	p.f = f
 
@@ -206,7 +225,7 @@ func (c *Compiler) fixFunc(ctx context.Context, p *pkgContext, f *ir.Func) (err 
 		}
 	}
 
-	if tlog.If("dump") {
+	if tlog.If("fixed_func,dump") {
 		tlog.Printw("function fixed", "name", f.Name, "inserted", inserted)
 
 		for i, id := range f.Code {
@@ -333,9 +352,9 @@ func (c *Compiler) buildGraph(ctx context.Context, p *pkgContext, f *ir.Func) (e
 	for run := 0; run < 2; run++ {
 		d.Reset()
 
-		for _, p := range f.In {
-			d.Set(int(p.Expr))
-		}
+		//	for _, p := range f.In {
+		//		d.Set(int(p.Expr))
+		//	}
 
 		for _, id := range f.Code {
 			x := p.Exprs[id]
@@ -356,6 +375,8 @@ func (c *Compiler) buildGraph(ctx context.Context, p *pkgContext, f *ir.Func) (e
 				for _, xx := range x {
 					d.Clear(int(xx))
 				}
+
+				d.Set(int(id))
 			case ir.Call:
 				// TODO
 			default:
@@ -439,12 +460,12 @@ func (c *Compiler) buildGraph(ctx context.Context, p *pkgContext, f *ir.Func) (e
 			case ir.Index:
 				dset(x.X, x.I)
 			case ir.Call:
-				dset(x.In...)
+				dset(x.Args...)
 			case ir.Data:
 			case ir.Ptr:
 				dset(x.X)
 			case ir.Struct:
-				dset(x...)
+				dset(x.Fields...)
 			case ir.Field:
 				dset(x.X)
 			default:
@@ -640,37 +661,46 @@ func (c *Compiler) colorGraph(ctx context.Context, p *pkgContext, f *ir.Func) (e
 	}
 
 	findV := func(i int) ir.Expr {
-		sort.SliceStable(q[i:i+l[i]], func(l, r int) bool {
-			return phi[q[i+l]].Size() > phi[q[i+r]].Size()
-		})
+		//	sort.SliceStable(q[i:i+l[i]], func(l, r int) bool {
+		//		return phi[q[i+l]].Size() > phi[q[i+r]].Size()
+		//	})
 
 		return q[i]
 	}
 
 	splitRange := func(s, e int, left func(ir.Expr) bool) {
 		//	tlog.Printw("sort range", "v", v, "s", s, "e", e, "of", len(q), "edges", edges[v])
-		i := s
-		j := e
+		if e-s <= 1 {
+			return
+		}
 
-		for i != j {
-			//	tlog.Printw("loop", "i", i, "j", j, "L", d.IsSet(q[i]), "R", d.IsSet(q[j-1]), "q", q[i:j])
-			if left(q[i]) {
+		b := make([]ir.Expr, e-s)
+
+		i := 0
+		for j := s; j < e; j++ {
+			if left(q[j]) {
+				b[i] = q[j]
 				i++
-			} else if !left(q[j-1]) {
-				j--
-			} else {
-				q[i], q[j-1] = q[j-1], q[i]
-				i++
-				j--
 			}
 		}
 
-		if i-s != 0 {
-			l[s] = i - s
+		m := s + i
+
+		for j := s; j < e; j++ {
+			if !left(q[j]) {
+				b[i] = q[j]
+				i++
+			}
 		}
 
-		if e-i != 0 {
-			l[i] = e - i
+		copy(q[s:], b)
+
+		if m-s != 0 {
+			l[s] = m - s
+		}
+
+		if e-m != 0 {
+			l[m] = e - m
 		}
 	}
 
@@ -782,9 +812,9 @@ func (c *Compiler) colorGraph(ctx context.Context, p *pkgContext, f *ir.Func) (e
 	// prealloc
 
 	{
-		for i, p := range f.In {
-			want[p.Expr] = Reg(i)
-		}
+		//	for i, p := range f.In {
+		//		want[p.Expr] = Reg(i)
+		//	}
 
 		for i, p := range f.Out {
 			want[p] = Reg(i)
@@ -793,12 +823,13 @@ func (c *Compiler) colorGraph(ctx context.Context, p *pkgContext, f *ir.Func) (e
 		for _, id := range f.Code {
 			x := p.Exprs[id]
 
-			if x, ok := x.(ir.Out); ok {
+			switch x := x.(type) {
+			case ir.Args:
+				want[id] = Reg(0)
+			case ir.Out:
 				want[id] = Reg(x)
-			}
-
-			if x, ok := x.(ir.Call); ok {
-				for i, a := range x.In {
+			case ir.Call:
+				for i, a := range x.Args {
 					want[a] = Reg(i)
 				}
 
@@ -807,10 +838,21 @@ func (c *Compiler) colorGraph(ctx context.Context, p *pkgContext, f *ir.Func) (e
 		}
 
 		// TODO: can we split here?
-		splitRange(0, len(q), func(id ir.Expr) bool {
-			_, ok := want[id]
+		//	splitRange(0, len(q), func(id ir.Expr) bool {
+		//		_, ok := want[id]
+		//
+		//		return ok
+		//	})
 
-			return ok
+		sort.SliceStable(q, func(l, r int) bool {
+			_, okl := want[q[l]]
+			_, okr := want[q[r]]
+
+			if okl != okr {
+				return okl
+			}
+
+			return phi[q[l]].Size() > phi[q[r]].Size()
 		})
 	}
 
@@ -1033,7 +1075,7 @@ _%[1]v:
 			b = fmt.Appendf(b, "%v:\n", labelName(x))
 		case ir.Phi:
 		case ir.Call:
-			for i, id := range x.In {
+			for i, id := range x.Args {
 				if reg(id) == Reg(i) {
 					continue
 				}
@@ -1043,7 +1085,7 @@ _%[1]v:
 
 			b = fmt.Appendf(b, "	BL	_%v	// func call  ", x.Func)
 
-			for i, id := range x.In {
+			for i, id := range x.Args {
 				if i != 0 {
 					b = fmt.Appendf(b, ", ")
 				}

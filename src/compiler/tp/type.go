@@ -5,10 +5,19 @@ type (
 		Size() int
 	}
 
+	Name string
+
+	Func struct {
+		In  []Type
+		Out []Type
+	}
+
 	Int struct {
 		Bits   int16
 		Signed bool
 	}
+
+	Untyped struct{}
 
 	Ptr struct {
 		X Type

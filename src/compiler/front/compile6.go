@@ -1,5 +1,3 @@
-//go:build ignore
-
 package front
 
 import (
@@ -7,12 +5,14 @@ import (
 	"fmt"
 	"go/ast"
 	"go/token"
+	"path"
 	"strconv"
 	"unsafe"
 
 	"github.com/nikandfor/errors"
 	"github.com/nikandfor/loc"
 	"github.com/nikandfor/tlog"
+
 	"github.com/slowlang/slow/src/compiler/ir"
 	"github.com/slowlang/slow/src/compiler/tp"
 )
@@ -21,70 +21,77 @@ type (
 	pkgContext struct {
 		*ir.Package
 
+		root *Scope
+
+		unty ir.Type
 		zero ir.Expr
+		self ir.Expr
 
-		exit *Scope
-
-		definition int
-		lab        ir.Label
-
-		allScopes []*Scope
+		def definition
+		lab ir.Label
 
 		tasks map[string]any
+		types map[any]ir.Type
+	}
+
+	funContext struct {
+		*ir.Func
+
+		exit *Scope
 	}
 
 	Scope struct {
+		*funContext
 		*pkgContext
-		id ir.Expr
-		f  *ir.Func
+
+		labid ir.Expr
+		lab   ir.Label
+
+		from  loc.PC
+		depth int
+		prev  []*Scope
 
 		cont *Scope
 		brea *Scope
 
-		def  map[string]int
-		vars map[int]ir.Expr
-		in   map[int]ir.Expr
-
-		depth int
-		prev  []*Scope
+		defs map[string]definition
+		vars map[definition]ir.Expr
 
 		phi  []ir.Expr
 		code []ir.Expr
 
 		retvals []ir.Expr
-
-		delayphi bool
-
-		from loc.PC
+		valuef  func(definition, visitSet) ir.Expr
 	}
 
-	visitSet map[*Scope]struct{}
-)
+	definition int
 
-const (
-	findNone = -1 - iota
-	findVisited
-	findDeadend
+	visitSet map[*Scope]struct{}
 )
 
 func (c *Front) Compile(ctx context.Context) (_ *ir.Package, err error) {
 	p := &pkgContext{
 		Package: &ir.Package{},
 		tasks:   map[string]any{},
+		types:   map[any]ir.Type{},
 	}
+
+	s := rootScope(p, nil)
+	s.from = loc.Caller(0)
+	p.root = s
+
+	p.unty = s.addType(tp.Untyped{})
+	p.zero = s.alloc(ir.Zero{}, p.unty)
+	p.self = s.alloc(p.Package, p.unty)
 
 	for _, f := range c.files {
 		for _, d := range f.Decls {
-			err = c.addTasks(ctx, p, d)
+			err = c.addTasks(ctx, s, d)
 			if err != nil {
 				return nil, errors.Wrap(err, "decl %T", d)
 			}
 		}
 	}
-
-	p.zero = p.alloc(ir.Zero{})
-
-	s := rootScope(p)
 
 	for name, d := range p.tasks {
 		err = c.compileTask(ctx, s, d)
@@ -98,15 +105,15 @@ func (c *Front) Compile(ctx context.Context) (_ *ir.Package, err error) {
 	return p.Package, nil
 }
 
-func (c *Front) addTasks(ctx context.Context, p *pkgContext, d ast.Decl) (err error) {
+func (c *Front) addTasks(ctx context.Context, s *Scope, d ast.Decl) (err error) {
 	switch d := d.(type) {
 	case *ast.FuncDecl:
-		c.addTask(ctx, p, d.Name.Name, d)
+		c.addTask(ctx, s, d.Name.Name, d)
 	case *ast.GenDecl:
 		for _, spec := range d.Specs {
 			switch d := spec.(type) {
 			case *ast.TypeSpec:
-				c.addTask(ctx, p, d.Name.Name, d)
+				c.addTask(ctx, s, d.Name.Name, d)
 			default:
 				panic(d)
 			}
@@ -118,19 +125,49 @@ func (c *Front) addTasks(ctx context.Context, p *pkgContext, d ast.Decl) (err er
 	return nil
 }
 
-func (c *Front) addTask(ctx context.Context, p *pkgContext, name string, task any) {
-	t, ok := p.tasks[name]
+func (c *Front) addTask(ctx context.Context, s *Scope, name string, task any) {
+	t, ok := s.tasks[name]
 	if ok {
 		panic(t)
 	}
 
-	p.tasks[name] = task
+	s.tasks[name] = task
+}
+
+func (c *Front) findFunc(ctx context.Context, s *Scope, name string) (ir.Expr, *ir.Func) {
+	for _, id := range s.pkgContext.Funcs {
+		f := s.pkgContext.Exprs[id].(*ir.Func)
+
+		if f.Name == name {
+			return id, f
+		}
+	}
+
+	d, ok := s.tasks[name]
+	if !ok {
+		panic(name)
+	}
+
+	fd, ok := d.(*ast.FuncDecl)
+	if !ok {
+		panic(name)
+	}
+
+	id, err := c.compileFunc(ctx, s.root, fd)
+	if err != nil {
+		panic(err.Error())
+	}
+
+	f := s.Exprs[id].(*ir.Func)
+
+	return id, f
 }
 
 func (c *Front) compileTask(ctx context.Context, s *Scope, d any) (err error) {
 	switch d := d.(type) {
 	case *ast.FuncDecl:
-		return c.compileFunc(ctx, s, d)
+		_, err = c.compileFunc(ctx, s, d)
+		return err
 	case *ast.TypeSpec:
 		return c.compileTypeSpec(ctx, s, d)
 	default:
@@ -138,40 +175,46 @@ func (c *Front) compileTask(ctx context.Context, s *Scope, d any) (err error) {
 	}
 }
 
-func (c *Front) compileFunc(ctx context.Context, par *Scope, fn *ast.FuncDecl) (err error) {
+func (c *Front) compileFunc(ctx context.Context, s *Scope, fn *ast.FuncDecl) (fid ir.Expr, err error) {
 	f := &ir.Func{
 		Name: fn.Name.Name,
 	}
+	tp := &tp.Func{}
 
-	par.Funcs = append(par.Funcs, f)
-	par.allScopes = par.allScopes[:0]
+	s = s.nextScope(-1, 1, s)
+	s.funContext = &funContext{
+		Func: f,
+	}
 
-	tlog.Printw("compile func", "name", f.Name)
-
-	s := par.nextScope(-1, 1, par)
-	s.f = f
-
-	lexit := s.label()
-	s.exit = par.nextScope(lexit, -1)
-
-	argsStart := s.pkgContext.id()
+	argsStart := ir.Expr(-1)
 
 	for _, p := range fn.Type.Params.List {
+		ptp, err := c.compileType(ctx, s, p.Type)
+		if err != nil {
+			return -1, errors.Wrap(err, "param type")
+		}
+
 		if len(p.Names) == 0 {
-			id := s.add(ir.Out(len(f.In)))
-			f.In = append(f.In, ir.Param{
-				Expr: id,
-			})
+			id := s.addTyped(ir.Out(len(f.In)), ptp)
+			f.In = append(f.In, ptp)
+
+			if len(f.In) == 1 {
+				argsStart = id
+			}
+
+			// TODO
+			//tp.In = append(tp.In, p.Exprs[ptp].(tp.Type))
 
 			continue
 		}
 
 		for _, name := range p.Names {
-			id := s.add(ir.Out(len(f.In)))
-			f.In = append(f.In, ir.Param{
-				Name: name.Name,
-				Expr: id,
-			})
+			id := s.addTyped(ir.Out(len(f.In)), ptp)
+			f.In = append(f.In, ptp)
+
+			if len(f.In) == 1 {
+				argsStart = id
+			}
 
 			s.define(name.Name, id)
 		}
@@ -183,6 +226,13 @@ func (c *Front) compileFunc(ctx context.Context, par *Scope, fn *ast.FuncDecl) (
 
 	if fn.Type.Results != nil {
 		for _, p := range fn.Type.Results.List {
+			ptp, err := c.compileType(ctx, s, p.Type)
+			if err != nil {
+				return -1, errors.Wrap(err, "param type")
+			}
+
+			_ = ptp // TODO
+
 			if len(p.Names) == 0 {
 				f.Out = append(f.Out, -1)
 				continue
@@ -196,135 +246,86 @@ func (c *Front) compileFunc(ctx context.Context, par *Scope, fn *ast.FuncDecl) (
 		}
 	}
 
+	ftp := s.addType(tp)
+	fid = s.alloc(f, ftp)
+	s.Funcs = append(s.Funcs, fid)
+
+	tlog.Printw("compile func", "name", f.Name, "id", fid, "typ", ftp)
+
+	s.exit = s.nextScope(s.label(), 0)
+
 	end, err := c.compileBlock(ctx, s, fn.Body)
 	if err != nil {
-		return errors.Wrap(err, "body")
+		return fid, errors.Wrap(err, "body")
 	}
 
 	end.branchTo(s.exit)
 
-	f.Out = make([]ir.Expr, len(f.Out))
-
 	for i := range f.Out {
-		phi := make(ir.Phi, 0, len(s.exit.prev))
+		var phi ir.Phi
 
 		for _, p := range s.exit.prev {
-			if p.retvals == nil {
-				continue
-			}
-
-			tlog.Printw("ret phi", "prev", p.ptr(), "retvals", p.retvals)
-
 			phi = append(phi, p.retvals[i])
 		}
 
 		f.Out[i] = s.exit.addphi(phi)
 	}
 
-	done := map[*Scope]struct{}{}
+	tlog.Printw("func scopes", "name", f.Name, "out", f.Out)
 
-	var pr func(s *Scope)
+	s.exit.walk(func(s *Scope) {
+		fmtFrom := func(pc loc.PC) string {
+			if pc == 0 {
+				return ""
+			}
 
-	pr = func(s *Scope) {
-		if s == nil {
-			return
+			name, _, line := pc.NameFileLine()
+			name = path.Ext(name)
+
+			return fmt.Sprintf("%s:%d", name, line)
 		}
 
-		if _, ok := done[s]; ok {
-			return
+		args := []interface{}{"ptr", s.ptr(), "d", s.depth}
+		args = append(args, "from", fmtFrom(s.from))
+		args = append(args, "prev", s.prevPtr())
+
+		if s.lab != -1 {
+			args = append(args, "lab", s.lab)
 		}
-
-		done[s] = struct{}{}
-
-		for _, p := range s.prev {
-			pr(p)
-		}
-
-		s.fixPhi()
-	}
-
-	pr(s.exit)
-
-	done = map[*Scope]struct{}{}
-
-	pr = func(s *Scope) {
-		if s == nil {
-			return
-		}
-
-		if _, ok := done[s]; ok {
-			return
-		}
-
-		done[s] = struct{}{}
-
-		for _, p := range s.prev {
-			pr(p)
-		}
-
-		args := []any{"p", s.ptr(), "prev", s.prevPtr(), "lab", s.idlabel(), "d", s.depth}
-		if len(s.in) != 0 {
-			args = append(args, "in", s.in)
-		}
-		if len(s.def) != 0 {
-			args = append(args, "def", s.def)
+		if len(s.defs) != 0 {
+			args = append(args, "defs", s.defs)
 		}
 		if len(s.vars) != 0 {
 			args = append(args, "vars", s.vars)
 		}
-		args = append(args, "from", s.from)
+		if len(s.retvals) != 0 {
+			args = append(args, "ret", s.retvals)
+		}
 
 		tlog.Printw("scope", args...)
-		//	tlog.Printw("scope", "p", s.ptr(), "prev", s.prevPtr(), "lab", s.idlabel(), "d", s.depth, "in", s.in, "def", s.def, "vars", s.vars, "from", tlog.FormatNext("%x"), s.from)
 
-		if s.id >= 0 {
-			x := s.Exprs[s.id]
-
-			tlog.Printw("label", "id", s.id, "typ", tlog.NextIsType, x, "val", x)
-
-			f.Code = append(f.Code, s.id)
+		if s.lab != -1 {
+			f.Code = append(f.Code, s.labid)
 		}
 
 		for _, id := range s.phi {
 			x := s.Exprs[id]
 
 			tlog.Printw("phi", "id", id, "typ", tlog.NextIsType, x, "val", x)
-		}
 
-		f.Code = append(f.Code, s.phi...)
+			f.Code = append(f.Code, id)
+		}
 
 		for _, id := range s.code {
 			x := s.Exprs[id]
 
 			tlog.Printw("code", "id", id, "typ", tlog.NextIsType, x, "val", x)
+
+			f.Code = append(f.Code, id)
 		}
+	})
 
-		f.Code = append(f.Code, s.code...)
-	}
-
-	tlog.Printw("function scopes", "name", f.Name)
-
-	pr(s.exit)
-
-	for _, s := range par.allScopes {
-		if _, ok := done[s]; ok {
-			continue
-		}
-
-		tlog.Printw("missed scopes", "p", s.ptr(), "", tlog.Error)
-
-		pr(s)
-	}
-
-	/*
-		for _, id := range f.Code {
-			x := s.Exprs[id]
-
-			tlog.Printw("func code", "id", id, "typ", tlog.NextType, x, "val", x)
-		}
-	*/
-
-	return nil
+	return fid, nil
 }
 
 func (c *Front) compileBlock(ctx context.Context, s *Scope, b *ast.BlockStmt) (_ *Scope, err error) {
@@ -350,7 +351,7 @@ func (c *Front) compileStmt(ctx context.Context, s *Scope, x ast.Stmt) (_ *Scope
 			}
 		}
 
-		s.ret(ids...)
+		s.ret(ids)
 
 		return s, nil
 	case *ast.AssignStmt:
@@ -376,7 +377,7 @@ func (c *Front) compileStmt(ctx context.Context, s *Scope, x ast.Stmt) (_ *Scope
 			if x.Tok == token.DEFINE {
 				s.define(v.Name, ids[i])
 			} else {
-				s.assign(v.Name, s.depth, ids[i])
+				s.assign(v.Name, ids[i])
 			}
 		}
 	case *ast.IncDecStmt:
@@ -390,7 +391,7 @@ func (c *Front) compileStmt(ctx context.Context, s *Scope, x ast.Stmt) (_ *Scope
 			return nil, errors.New("unsupported lexpr: %T", x)
 		}
 
-		one := s.add(ir.Imm(1))
+		one := s.addTyped(ir.Imm(1), s.unty)
 
 		var op any
 
@@ -400,9 +401,9 @@ func (c *Front) compileStmt(ctx context.Context, s *Scope, x ast.Stmt) (_ *Scope
 			op = ir.Sub{L: id, R: one}
 		}
 
-		id = s.add(op)
+		id = s.addTyped(op, s.EType[id])
 
-		s.assign(v.Name, s.depth, id)
+		s.assign(v.Name, id)
 	case *ast.IfStmt:
 		s, err = c.compileIf(ctx, s, x)
 		if err != nil {
@@ -416,9 +417,9 @@ func (c *Front) compileStmt(ctx context.Context, s *Scope, x ast.Stmt) (_ *Scope
 	case *ast.BranchStmt:
 		switch x.Tok {
 		case token.BREAK:
-			s.doBreak()
+			s.doBreak(-1)
 		case token.CONTINUE:
-			s.doContinue()
+			s.doContinue(-1)
 		default:
 			panic(x)
 		}
@@ -431,10 +432,9 @@ func (c *Front) compileStmt(ctx context.Context, s *Scope, x ast.Stmt) (_ *Scope
 
 func (c *Front) compileIf(ctx context.Context, prev *Scope, x *ast.IfStmt) (_ *Scope, err error) {
 	var labels []ir.Label
-	end := prev.label()
 
 	scond := prev.nextScope(-1, 1, prev)
-	next := prev.nextScope(end, 0)
+	next := prev.nextScope(prev.label(), 0)
 
 	for q := x; q != nil; {
 		cond, condExpr, err := c.compileCond(ctx, scond, x.Cond)
@@ -514,35 +514,46 @@ func (c *Front) compileIf(ctx context.Context, prev *Scope, x *ast.IfStmt) (_ *S
 }
 
 func (c *Front) compileFor(ctx context.Context, prev *Scope, x *ast.ForStmt) (_ *Scope, err error) {
-	lcond := prev.label()
-	lbody := prev.label()
-	lend := prev.label()
-
 	var scond, sbody, send *Scope
 
 	if x.Cond != nil {
-		scond = prev.nextScope(lcond, 1, prev)
-		sbody = prev.nextScope(lbody, 2, scond)
-		send = prev.nextScope(lend, 0, scond)
+		scond = prev.nextScope(prev.label(), 1, prev)
+		sbody = prev.nextScope(prev.label(), 2, scond)
+		send = prev.nextScope(prev.label(), 0, scond)
 	} else {
-		scond = prev.nextScope(lcond, 1, prev)
+		scond = prev.nextScope(prev.label(), 1, prev)
 		sbody = scond
-		send = prev.nextScope(lend, 0)
+		send = prev.nextScope(prev.label(), 0)
 	}
 
-	for _, s := range []*Scope{scond, sbody, send} {
-		if s == nil {
-			continue
+	phi := map[definition]ir.Expr{}
+
+	scond.valuef = func(def definition, visited visitSet) (id ir.Expr) {
+		defer func() {
+			tlog.Printw("custom value", "ptr", scond.ptr(), "d", scond.depth, "def", def, "id", id, "from", loc.Callers(2, 3))
+		}()
+
+		id, ok := phi[def]
+		if ok {
+			return id
 		}
 
-		s := s
+		id = scond.addphi(ir.Phi{})
+		phi[def] = id
 
-		s.delayphi = true
-
-		defer func() {
-			s.delayphi = false
-		}()
+		return id
 	}
+
+	defer func() {
+		scond.valuef = nil
+
+		for def, id := range phi {
+			scond.vars[def] = id
+			scond.Exprs[id] = scond.mergeValues(def, nil)
+
+			tlog.Printw("fix phi", "ptr", scond.ptr(), "d", scond.depth, "def", def, "id", id, "phi", scond.Exprs[id])
+		}
+	}()
 
 	sbody.cont = scond
 	sbody.brea = send
@@ -559,11 +570,11 @@ func (c *Front) compileFor(ctx context.Context, prev *Scope, x *ast.ForStmt) (_ 
 
 		scond.add(ir.BCond{
 			Expr:  condExpr,
-			Cond:  cond,
-			Label: lbody,
+			Cond:  revcond(cond),
+			Label: send.lab,
 		})
 
-		scond.branchTo(send)
+		scond.branchTo(sbody)
 	}
 
 	// body
@@ -576,7 +587,7 @@ func (c *Front) compileFor(ctx context.Context, prev *Scope, x *ast.ForStmt) (_ 
 	sbodyEnd.branchTo(scond)
 
 	tlog.Printw("for prev", "p", prev.ptr())
-	tlog.Printw("for next", "p", sbodyEnd.ptr())
+	tlog.Printw("for next", "p", send.ptr())
 
 	return send, nil
 }
@@ -602,7 +613,7 @@ func (c *Front) compileCond(ctx context.Context, s *Scope, e ast.Expr) (cc ir.Co
 func (c *Front) compileExpr(ctx context.Context, s *Scope, e ast.Expr) (id ir.Expr, err error) {
 	switch e := e.(type) {
 	case *ast.Ident:
-		id = s.findValue(e.Name, s.depth)
+		id = s.value(e.Name)
 		if id == -1 {
 			// TODO
 			panic(e.Name)
@@ -623,9 +634,9 @@ func (c *Front) compileExpr(ctx context.Context, s *Scope, e ast.Expr) (id ir.Ex
 				panic(err)
 			}
 
-			id = s.add(ir.Data(data))
+			id = s.add(ir.Data(data + "\000")) // TODO
 			id = s.add(ir.Ptr{X: id})
-			id = s.add(ir.Struct{id, s.add(ir.Imm(len(data)))})
+		//	id = s.add(ir.Struct{id, s.add(ir.Imm(len(data)))})
 		default:
 			panic(e.Kind)
 		}
@@ -725,30 +736,21 @@ func (c *Front) compileExpr(ctx context.Context, s *Scope, e ast.Expr) (id ir.Ex
 	case *ast.CallExpr:
 		n := e.Fun.(*ast.Ident)
 
+		fid, fdef := c.findFunc(ctx, s, n.Name)
+
 		x := ir.Call{
-			Func: n.Name,
-			In:   make([]ir.Expr, len(e.Args)),
+			Func: fid,
+			Args: make([]ir.Expr, len(e.Args)),
 		}
 
 		for i, a := range e.Args {
-			x.In[i], err = c.compileExpr(ctx, s, a)
+			x.Args[i], err = c.compileExpr(ctx, s, a)
 			if err != nil {
 				return -1, errors.Wrap(err, "op lhs")
 			}
 		}
 
 		id = s.add(x)
-
-		var fdef *ir.Func
-
-		for _, f := range s.pkgContext.Funcs {
-			if f.Name != n.Name {
-				continue
-			}
-
-			fdef = f
-			break
-		}
 
 		for i := 1; i < len(fdef.Out); i++ {
 			s.add(ir.Out(i))
@@ -764,72 +766,8 @@ func (c *Front) compileExpr(ctx context.Context, s *Scope, e ast.Expr) (id ir.Ex
 	return
 }
 
-func (c *Front) compileType(ctx context.Context, s *Scope, e ast.Expr) (x tp.Type, err error) {
-	switch e := e.(type) {
-	case *ast.Ident:
-		for _, t := range s.Package.Types {
-			if t.Name == e.Name {
-				x = t.Type
-			}
-		}
-
-		if x != nil {
-			return x, nil
-		}
-
-		switch e.Name {
-		case "int":
-			x = tp.Int{Bits: 64, Signed: true}
-		default:
-			panic(e.Name)
-		}
-	case *ast.StructType:
-		if e.Incomplete {
-			panic(e)
-		}
-
-		x := tp.Struct{}
-
-		if e.Fields == nil || len(e.Fields.List) == 0 {
-			return x, nil
-		}
-
-		for _, f := range e.Fields.List {
-			ft, err := c.compileType(ctx, s, f.Type)
-			if err != nil {
-				return nil, errors.Wrap(err, "field %v", f.Type)
-			}
-
-			if len(f.Names) == 0 {
-				x.Fields = append(x.Fields, tp.StructField{
-					Name: c.baseName(ctx, f.Type),
-					Type: ft,
-				})
-			}
-
-			for _, fn := range f.Names {
-				x.Fields = append(x.Fields, tp.StructField{
-					Name: fn.Name,
-					Type: ft,
-				})
-			}
-		}
-	default:
-		panic(fmt.Sprintf("%T: %[1]v", e))
-	}
-
-	return x, nil
-}
-
-func (c *Front) baseName(ctx context.Context, tp ast.Expr) string {
-	switch tp := tp.(type) {
-	default:
-		panic(tp)
-	}
-}
-
-func (c *Front) compileTypeSpec(ctx context.Context, par *Scope, spec *ast.TypeSpec) (err error) {
-	id, err := c.compileType(ctx, par, spec.Type)
+func (c *Front) compileTypeSpec(ctx context.Context, s *Scope, spec *ast.TypeSpec) (err error) {
+	id, err := c.compileType(ctx, s, spec.Type)
 	if err != nil {
 		return errors.Wrap(err, "type expr")
 	}
@@ -839,90 +777,34 @@ func (c *Front) compileTypeSpec(ctx context.Context, par *Scope, spec *ast.TypeS
 	return nil
 }
 
-func rootScope(p *pkgContext) *Scope {
-	s := &Scope{
-		id:   -1,
-		def:  map[string]int{},
-		vars: map[int]ir.Expr{},
-		in:   map[int]ir.Expr{},
-		from: loc.Caller(1),
-
-		pkgContext: p,
-	}
-
-	p.allScopes = append(p.allScopes, s)
-
-	return s
-}
-
-func (par *Scope) nextScope(lab ir.Label, d int, prev ...*Scope) *Scope {
-	s := rootScope(par.pkgContext)
-	s.from = loc.Caller(1)
-	s.prev = prev
-
-	s.f = par.f
-	s.depth = par.depth + d
-
-	if lab >= 0 {
-		s.id = s.alloc(lab)
-	}
-
-	tlog.Printw("new scope", "p", s.ptr(), "lab", s.idlabel(), "d", s.depth, "prev", s.prevPtr(), "from", loc.Callers(1, 3))
-
-	return s
-}
-
-func (s *Scope) branchTo(to *Scope) {
-	if l := len(s.code); l != 0 {
-		if _, ok := s.Exprs[s.code[l-1]].(ir.B); ok {
-			return
+func (c *Front) compileType(ctx context.Context, s *Scope, e ast.Expr) (id ir.Type, err error) {
+	switch e := e.(type) {
+	case *ast.Ident:
+		switch e.Name {
+		case "int":
+			id = s.addType(tp.Int{Bits: 64, Signed: true})
+		default:
+			panic(e.Name)
 		}
+	default:
+		panic(fmt.Sprintf("%T: %[1]v", e))
 	}
 
-	s.add(ir.B{Label: to.idlabel()})
-
-	to.appendPrev(s)
+	return id, nil
 }
 
-func (s *Scope) ret(ids ...ir.Expr) {
-	tlog.Printw("ret", "s", s.id, "f", s.f)
-
-	if len(s.f.Out) != len(ids) {
-		panic("mismatch")
+func rootScope(pkg *pkgContext, fun *funContext) *Scope {
+	return &Scope{
+		pkgContext: pkg,
+		funContext: fun,
+		labid:      -1,
+		lab:        -1,
+		vars:       make(map[definition]ir.Expr),
 	}
-
-	// TODO
-	s.retvals = ids
-
-	s.branchTo(s.exit)
-}
-
-func (s *Scope) doContinue() {
-	q := s
-
-	for q.cont == nil || q.depth > s.depth {
-		q = q.prev[0]
-	}
-
-	tlog.Printw("continue", "from", s.ptr(), "to", q.cont.ptr(), "q", q.ptr())
-
-	s.branchTo(q.cont)
-}
-
-func (s *Scope) doBreak() {
-	q := s
-
-	for q.brea == nil || q.depth > s.depth {
-		q = q.prev[0]
-	}
-
-	tlog.Printw("break", "from", s.ptr(), "to", q.brea.ptr(), "q", q.ptr())
-
-	s.branchTo(q.brea)
 }
 
 func (s *Scope) ptr() uintptr {
-	return uintptr(unsafe.Pointer(s)) & 0xffffff
+	return uintptr(unsafe.Pointer(s)) & 0xfffff
 }
 
 func (s *Scope) prevPtr() []uintptr {
@@ -939,82 +821,89 @@ func (s *Scope) prevPtr() []uintptr {
 	return l
 }
 
-func (s *Scope) idlabel() ir.Label {
-	if s == nil || s.id == -1 || s.pkgContext == nil {
-		return -1
+func (s *Scope) nextScope(lab ir.Label, delta int, prev ...*Scope) *Scope {
+	next := rootScope(s.pkgContext, s.funContext)
+
+	if lab != -1 {
+		next.lab = lab
+		next.labid = s.alloc(lab, -1)
 	}
 
-	return s.Exprs[s.id].(ir.Label)
+	next.from = loc.Caller(1)
+	next.depth = s.depth + delta
+	next.prev = prev
+
+	return next
 }
 
-func (s *Scope) add(x any) ir.Expr {
-	id := s.pkgContext.alloc(x)
-
-	s.code = append(s.code, id)
-
-	return id
-}
-
-func (s *Scope) addphi(x ir.Phi) ir.Expr {
-	id := s.pkgContext.alloc(x)
-
+func (s *Scope) addphi(x any) ir.Expr {
+	id := s.pkgContext.alloc(x, -1)
 	s.phi = append(s.phi, id)
 
 	return id
 }
 
-func (s *Scope) define(name string, id ir.Expr) {
-	def := s.definition
-	s.definition++
+func (s *Scope) add(x any) ir.Expr {
+	id := s.pkgContext.alloc(x, -1)
+	s.code = append(s.code, id)
 
-	tlog.Printw("define var", "p", s.ptr(), "lab", s.idlabel(), "d", s.depth, "name", name, "def", def, "id", id, "from", loc.Callers(1, 3))
-
-	s.def[name] = def
-	s.vars[def] = id
+	return id
 }
 
-func (s *Scope) assign(name string, d int, id ir.Expr) {
-	def := s.findDef(name, d)
-	if def == -1 {
+func (s *Scope) addTyped(x any, tp ir.Type) ir.Expr {
+	id := s.pkgContext.alloc(x, tp)
+	s.code = append(s.code, id)
+
+	return id
+}
+
+func (s *Scope) define(name string, id ir.Expr) {
+	_, ok := s.findDef(name, s.depth)
+	if ok {
 		panic(name)
 	}
 
-	tlog.Printw("assign var", "p", s.ptr(), "lab", s.idlabel(), "d", s.depth, "name", name, "def", def, "id", id, "from", loc.Callers(1, 3))
+	if s.defs == nil {
+		s.defs = map[string]definition{}
+	}
+
+	s.defs[name] = s.def
+	s.vars[s.def] = id
+	s.def++
+}
+
+func (s *Scope) assign(name string, id ir.Expr) {
+	def, ok := s.findDef(name, s.depth)
+	if !ok {
+		panic(name)
+	}
 
 	s.vars[def] = id
 }
 
-func (s *Scope) findValue(name string, d int) (id ir.Expr) {
-	var def int
-
-	if tlog.If("findValue") {
-		defer func() {
-			tlog.Printw("find value", "p", s.ptr(), "lab", s.idlabel(), "d", s.depth, "name", name, "def", def, "id", id, "from", loc.Callers(1, 3))
-		}()
+func (s *Scope) value(name string) ir.Expr {
+	def, ok := s.findDef(name, s.depth)
+	if !ok {
+		panic(name)
 	}
 
-	def = s.findDef(name, d)
-	if def == -1 {
-		return -1
-	}
-
-	return s.findVar(def, nil)
+	return s.findValue(def, nil)
 }
 
-func (s *Scope) findVar(def int, visited visitSet) (id ir.Expr) {
+func (s *Scope) findValue(def definition, visited visitSet) (id ir.Expr) {
 	if visited == nil {
 		visited = make(visitSet)
 	}
 
 	if _, ok := visited[s]; ok {
-		return findVisited
+		return -1
 	}
 
 	visited[s] = struct{}{}
 
-	if tlog.If("findVar") {
+	if tlog.If("findValue") {
 		defer func() {
-			tlog.Printw("find var", "p", s.ptr(), "lab", s.idlabel(), "d", s.depth, "def", def, "id", id, "from", loc.Callers(1, 3))
+			tlog.Printw("find value", "ptr", s.ptr(), "d", s.depth, "def", def, "id", id, "from", loc.Callers(1, 4))
 		}()
 	}
 
@@ -1023,98 +912,125 @@ func (s *Scope) findVar(def int, visited visitSet) (id ir.Expr) {
 		return id
 	}
 
-	id, ok = s.in[def]
-	if ok {
-		return id
-	}
-
-	if s.delayphi {
-		id := s.addphi(ir.Phi{})
-
-		s.in[def] = id
-
-		return id
+	if f := s.valuef; f != nil {
+		return f(def, visited)
 	}
 
 	switch len(s.prev) {
 	case 0:
 		return -1
 	case 1:
-		return s.prev[0].findVar(def, visited)
-	default:
+		return s.prev[0].findValue(def, visited)
 	}
 
-	phi := s.findMerge(def, visited)
-	id = s.addphi(phi)
+	return s.findValueMerge(def, visited)
+}
 
-	s.in[def] = id
+func (s *Scope) findValueMerge(def definition, visited visitSet) ir.Expr {
+	phi := s.mergeValues(def, visited)
+
+	id := s.addphi(phi)
+	s.vars[def] = id
 
 	return id
 }
 
-func (s *Scope) findMerge(def int, visited visitSet) ir.Phi {
+func (s *Scope) mergeValues(def definition, visited visitSet) ir.Phi {
 	var phi ir.Phi
 
-prevs:
 	for _, p := range s.prev {
-		sub := p.findVar(def, visited)
-		switch sub {
-		case findVisited, findDeadend:
-			continue
-		case findNone:
-			panic(def)
-		}
+		id := p.findValue(def, visited)
 
-		if sub < 0 {
-			panic(def)
-		}
-
-		for _, x := range phi {
-			if sub == x {
-				continue prevs
-			}
-		}
-
-		phi = append(phi, sub)
-	}
-
-	if len(phi) == 0 {
-		panic(def)
+		phi = append(phi, id)
 	}
 
 	return phi
 }
 
-func (s *Scope) fixPhi() {
-	for def, id := range s.in {
-		x := s.Exprs[id].(ir.Phi)
-		if len(x) != 0 {
-			continue
-		}
-
-		s.Exprs[id] = s.findMerge(def, nil)
-	}
+func (s *Scope) fixphi() {
 }
 
-func (s *Scope) findDef(name string, d int) (def int) {
-	if tlog.If("findDef") {
-		defer func() {
-			tlog.Printw("find def", "p", s.ptr(), "lab", s.idlabel(), "d", s.depth, "name", name, "def", def, "req.d", d)
-		}()
+func (s *Scope) findDef(name string, depth int) (def definition, ok bool) {
+	ok = s.find(func(s *Scope) bool {
+		def, ok = s.defs[name]
+		return ok
+	}, s.depth)
+
+	return
+}
+
+func (s *Scope) ret(ids []ir.Expr) {
+	if len(s.Func.Out) != len(ids) {
+		panic(ids)
 	}
 
-	if d >= s.depth {
-		if def, ok := s.def[name]; ok {
-			return def
+	// TODO: check types
+
+	s.retvals = ids
+	s.branchTo(s.exit)
+}
+
+func (s *Scope) doContinue(lab ir.Expr) {
+	var head *Scope
+
+	ok := s.find(func(s *Scope) bool {
+		if lab != -1 && s.labid != lab {
+			return false
+		} else if s.cont == nil {
+			return false
+		}
+
+		head = s
+
+		return true
+	}, s.depth)
+	if !ok {
+		panic("not ok")
+	}
+	if head.cont == nil {
+		panic("where?")
+	}
+
+	s.branchTo(head.cont)
+}
+
+func (s *Scope) doBreak(lab ir.Expr) {
+	var head *Scope
+
+	ok := s.find(func(s *Scope) bool {
+		if lab != -1 && s.labid != lab {
+			return false
+		} else if s.cont == nil {
+			return false
+		}
+
+		head = s
+
+		return true
+	}, s.depth)
+	if !ok {
+		panic("not ok")
+	}
+	if head.brea == nil {
+		panic("where?")
+	}
+
+	s.branchTo(head.brea)
+}
+
+func (s *Scope) branchTo(to *Scope) {
+	if l := len(s.code); l != 0 {
+		if _, ok := s.Exprs[s.code[l-1]].(ir.B); ok {
+			return
 		}
 	}
 
-	if len(s.prev) == 0 {
-		return -1
+	if to.labid == -1 {
+		panic(to)
 	}
 
-	// TODO: maybe check all prev?
-	return s.prev[0].findDef(name, d)
+	s.add(ir.B{Label: to.lab})
+	to.appendPrev(s)
 }
 
 func (s *Scope) appendPrev(prev *Scope) {
@@ -1127,20 +1043,90 @@ func (s *Scope) appendPrev(prev *Scope) {
 	s.prev = append(s.prev, prev)
 }
 
-func (p *pkgContext) id() ir.Expr {
-	return ir.Expr(len(p.Package.Exprs))
+func (s *Scope) find(f func(*Scope) bool, depth int) bool {
+	if s.depth <= depth {
+		if f(s) {
+			return true
+		}
+	}
+
+	if len(s.prev) == 0 {
+		return false
+	}
+
+	return s.prev[0].find(f, s.depth)
 }
 
-func (p *pkgContext) alloc(x any) ir.Expr {
-	id := ir.Expr(len(p.Package.Exprs))
-	p.Package.Exprs = append(p.Package.Exprs, x)
+func (s *Scope) walk(f func(s *Scope)) {
+	done := make(visitSet)
+
+	var walk func(*Scope)
+	walk = func(s *Scope) {
+		if _, ok := done[s]; ok {
+			return
+		}
+
+		done[s] = struct{}{}
+
+		for _, p := range s.prev {
+			walk(p)
+		}
+
+		f(s)
+	}
+
+	walk(s)
+}
+
+func (p *pkgContext) id() ir.Expr {
+	return ir.Expr(len(p.Exprs))
+}
+
+func (p *pkgContext) alloc(x any, tp ir.Type) ir.Expr {
+	id := p.id()
+	p.Exprs = append(p.Exprs, x)
+	p.EType = append(p.EType, tp)
 
 	return id
+}
+
+func (p *pkgContext) typeid() ir.Type {
+	return ir.Type(p.id())
+}
+
+func (p *pkgContext) addType(x any) ir.Type {
+	tp, ok := p.types[x]
+	if ok {
+		return tp
+	}
+
+	tp = ir.Type(p.alloc(x, -1))
+	p.types[x] = tp
+
+	return tp
 }
 
 func (p *pkgContext) label() ir.Label {
 	l := p.lab
 	p.lab++
-
 	return l
+}
+
+func revcond(x ir.Cond) ir.Cond {
+	switch x {
+	case "==":
+		return "!="
+	case "!=":
+		return "=="
+	case "<":
+		return ">="
+	case ">":
+		return "<="
+	case "<=":
+		return ">"
+	case ">=":
+		return "<"
+	default:
+		panic(x)
+	}
 }
