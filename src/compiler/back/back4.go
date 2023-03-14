@@ -363,8 +363,10 @@ func (c *Compiler) buildGraph(ctx context.Context, p *pkgContext, f *ir.Func) (e
 
 			switch x := x.(type) {
 			case ir.Imm, ir.Args, ir.Out:
-			case ir.Cmp, ir.Add, ir.Sub, ir.Mul, ir.Index:
-			case ir.Data, ir.Ptr, ir.Struct, ir.Field:
+			case ir.Cmp, ir.Add, ir.Sub, ir.Mul:
+			case ir.Data, ir.Ptr, ir.Deref, ir.Offset:
+			case ir.Assign:
+			case ir.Alloc:
 			case ir.Label:
 				d.Or(labelhave[x])
 			case ir.B:
@@ -457,17 +459,19 @@ func (c *Compiler) buildGraph(ctx context.Context, p *pkgContext, f *ir.Func) (e
 				dset(x.L, x.R)
 			case ir.Mul:
 				dset(x.L, x.R)
-			case ir.Index:
-				dset(x.X, x.I)
 			case ir.Call:
 				dset(x.Args...)
 			case ir.Data:
 			case ir.Ptr:
 				dset(x.X)
-			case ir.Struct:
-				dset(x.Fields...)
-			case ir.Field:
-				dset(x.X)
+			case ir.Deref:
+				dset(x.Ptr)
+			case ir.Offset:
+				dset(x.Base, x.Offset /*, x.Size*/)
+			case ir.Assign:
+				dset(x.Ptr, x.Val)
+			case ir.Alloc:
+			//	dset(x.Type)
 			default:
 				panic(x)
 			}
@@ -1049,8 +1053,6 @@ _%[1]v:
 			b = fmt.Appendf(b, "	SUB	X%d, X%d, X%d	// expr %d\n", reg(id), reg(x.L), reg(x.R), id)
 		case ir.Mul:
 			b = fmt.Appendf(b, "	MUL	X%d, X%d, X%d	// expr %d\n", reg(id), reg(x.L), reg(x.R), id)
-		case ir.Index:
-			b = fmt.Appendf(b, "	LDR	X%d, [X%d, X%d, LSL #3]	// expr %d\n", reg(id), reg(x.X), reg(x.I), id)
 		case ir.Cmp:
 			b = fmt.Appendf(b, "	CMP	X%d, X%d	// expr %d\n", reg(x.L), reg(x.R), id)
 		case ir.B:
@@ -1098,13 +1100,26 @@ _%[1]v:
 			if r := reg(id); r != 0 {
 				b = fmt.Appendf(b, "	MOV	X%d, X%d	// func res %d fix\n", reg(id), 0, 0)
 			}
-		case ir.Data:
-		case ir.Ptr:
-			b = fmt.Appendf(b, "	ADR	X%d, .data.%d	// expr %d\n", reg(id), x.X, id)
-		case ir.Struct:
-			b = fmt.Appendf(b, "	// struct expr %d  reg %d  %v\n", id, reg(id), x)
-		case ir.Field:
-			b = fmt.Appendf(b, "	// field expr %d  reg %d  %v\n", id, reg(id), x)
+		case ir.Offset:
+			sz := p.Exprs[x.Size].(ir.Imm)
+
+			if sz&(sz-1) == 0 {
+				lsl := pow(int(sz))
+				b = fmt.Appendf(b, "	ADD	X%d, X%d, X%d, LSL %d	// expr %d\n", reg(id), reg(x.Base), reg(x.Offset), lsl, id)
+			} else {
+				panic(sz)
+			}
+		case ir.Assign:
+			b = fmt.Appendf(b, "	STR	X%d, [X%d]	// expr %d\n", reg(x.Val), reg(x.Ptr), id)
+		case ir.Alloc:
+			b = fmt.Appendf(b, "	SUB	SP, #32		// expr %d\n", id)
+			b = fmt.Appendf(b, "	MOV	X%d, SP		// expr %d\n", reg(id), id)
+		case ir.Deref:
+			b = fmt.Appendf(b, "	LDR	X%d, [X%d]	// expr %d\n", reg(id), reg(x.Ptr), id)
+
+			//	case ir.Data:
+			//	case ir.Ptr:
+			//		b = fmt.Appendf(b, "	ADR	X%d, .data.%d	// expr %d\n", reg(id), x.X, id)
 		default:
 			panic(x)
 		}
@@ -1254,4 +1269,17 @@ func cond2asm(cond ir.Cond) string {
 	default:
 		panic(cond)
 	}
+}
+
+func pow(x int) (p int) {
+	if x < 1 {
+		panic(x)
+	}
+
+	for x > 1 {
+		p++
+		x >>= 1
+	}
+
+	return p
 }

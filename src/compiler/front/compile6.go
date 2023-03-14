@@ -31,7 +31,7 @@ type (
 		lab ir.Label
 
 		tasks map[string]any
-		types map[any]ir.Type
+		types map[string]ir.Type // cache
 	}
 
 	funContext struct {
@@ -73,7 +73,7 @@ func (c *Front) Compile(ctx context.Context) (_ *ir.Package, err error) {
 	p := &pkgContext{
 		Package: &ir.Package{},
 		tasks:   map[string]any{},
-		types:   map[any]ir.Type{},
+		types:   map[string]ir.Type{},
 	}
 
 	s := rootScope(p, nil)
@@ -369,26 +369,32 @@ func (c *Front) compileStmt(ctx context.Context, s *Scope, x ast.Stmt) (_ *Scope
 		}
 
 		for i, e := range x.Lhs {
-			v, ok := e.(*ast.Ident)
-			if !ok {
-				return nil, errors.New("unsupported lexpr: %T", e)
+			tlog.V("assignment").Printw("assign", "lhs", tlog.NextIsType, x.Lhs[i], "rhs", tlog.NextIsType, x.Rhs[i], "id", ids[i])
+
+			if v, ok := e.(*ast.Ident); ok {
+				if x.Tok == token.DEFINE {
+					s.define(v.Name, ids[i])
+				} else {
+					s.assign(v.Name, ids[i])
+				}
+
+				continue
 			}
 
-			if x.Tok == token.DEFINE {
-				s.define(v.Name, ids[i])
-			} else {
-				s.assign(v.Name, ids[i])
+			ptr, err := c.compileLExpr(ctx, s, e)
+			if err != nil {
+				return nil, errors.Wrap(err, "lexpr")
 			}
+
+			_ = s.add(ir.Assign{
+				Ptr: ptr,
+				Val: ids[i],
+			})
 		}
 	case *ast.IncDecStmt:
 		id, err := c.compileExpr(ctx, s, x.X)
 		if err != nil {
 			return s, errors.Wrap(err, "inc expr")
-		}
-
-		v, ok := x.X.(*ast.Ident)
-		if !ok {
-			return nil, errors.New("unsupported lexpr: %T", x)
 		}
 
 		one := s.addTyped(ir.Imm(1), s.unty)
@@ -403,7 +409,20 @@ func (c *Front) compileStmt(ctx context.Context, s *Scope, x ast.Stmt) (_ *Scope
 
 		id = s.addTyped(op, s.EType[id])
 
-		s.assign(v.Name, id)
+		if v, ok := x.X.(*ast.Ident); ok {
+			s.assign(v.Name, id)
+			break
+		}
+
+		ptr, err := c.compileLExpr(ctx, s, x.X)
+		if err != nil {
+			return nil, errors.Wrap(err, "lexpr")
+		}
+
+		_ = s.add(ir.Assign{
+			Ptr: ptr,
+			Val: id,
+		})
 	case *ast.IfStmt:
 		s, err = c.compileIf(ctx, s, x)
 		if err != nil {
@@ -423,6 +442,15 @@ func (c *Front) compileStmt(ctx context.Context, s *Scope, x ast.Stmt) (_ *Scope
 		default:
 			panic(x)
 		}
+	case *ast.ExprStmt:
+		tlog.Printw("expr stmt", "pos", x.Pos(), "val", x)
+
+		id, err := c.compileExpr(ctx, s, x.X)
+		if err != nil {
+			return nil, errors.Wrap(err, "expr stmt")
+		}
+
+		_ = id
 	default:
 		panic(x)
 	}
@@ -610,6 +638,38 @@ func (c *Front) compileCond(ctx context.Context, s *Scope, e ast.Expr) (cc ir.Co
 	return
 }
 
+func (c *Front) compileLExpr(ctx context.Context, s *Scope, e ast.Expr) (id ir.Expr, err error) {
+	switch e := e.(type) {
+	case *ast.Ident:
+		id = s.value(e.Name)
+		if id == -1 {
+			// TODO
+			panic(e.Name)
+			//	return id, errors.New("undefined var: %s", e)
+		}
+	case *ast.IndexExpr:
+		base, err := c.compileLExpr(ctx, s, e.X)
+		if err != nil {
+			return 0, errors.Wrap(err, "index base")
+		}
+
+		idx, err := c.compileExpr(ctx, s, e.Index)
+		if err != nil {
+			return 0, errors.Wrap(err, "index idx")
+		}
+
+		id = s.add(ir.Offset{
+			Base:   base,
+			Offset: idx,
+			Size:   s.add(ir.Imm(8)),
+		})
+	default:
+		panic(fmt.Sprintf("%T: %[1]v", e))
+	}
+
+	return id, nil
+}
+
 func (c *Front) compileExpr(ctx context.Context, s *Scope, e ast.Expr) (id ir.Expr, err error) {
 	switch e := e.(type) {
 	case *ast.Ident:
@@ -702,12 +762,17 @@ func (c *Front) compileExpr(ctx context.Context, s *Scope, e ast.Expr) (id ir.Ex
 			return -1, errors.Wrap(err, "index base")
 		}
 
-		op := ir.Index{
-			X: x,
-			I: idx,
+		size := s.add(ir.Imm(8))
+
+		op := ir.Offset{
+			Base:   x,
+			Offset: idx,
+			Size:   size,
 		}
 
 		id = s.add(op)
+
+		id = s.add(ir.Deref{Ptr: id})
 	case *ast.SelectorExpr:
 		x, err := c.compileExpr(ctx, s, e.X)
 		if err != nil {
@@ -716,20 +781,12 @@ func (c *Front) compileExpr(ctx context.Context, s *Scope, e ast.Expr) (id ir.Ex
 
 		tlog.Printw("selector expr", "x", e.X, "sel", e.Sel)
 
-		var idx int
+		off := s.add(ir.Imm(0))
 
-		switch e.Sel.Name {
-		case "Ptr":
-			idx = 0
-		case "Len":
-			idx = 1
-		default:
-			panic(e.Sel.Name)
-		}
-
-		op := ir.Field{
-			X: x,
-			I: idx,
+		op := ir.Offset{
+			Base:   x,
+			Offset: off,
+			Size:   s.add(ir.Imm(8)),
 		}
 
 		id = s.add(op)
@@ -756,6 +813,13 @@ func (c *Front) compileExpr(ctx context.Context, s *Scope, e ast.Expr) (id ir.Ex
 			s.add(ir.Out(i))
 		}
 	case *ast.CompositeLit:
+		tp, err := c.compileType(ctx, s, e.Type)
+		if err != nil {
+			return 0, errors.Wrap(err, "type")
+		}
+
+		id = s.add(ir.Alloc{Type: tp})
+
 		if e.Incomplete {
 			panic(e)
 		}
@@ -774,18 +838,73 @@ func (c *Front) compileTypeSpec(ctx context.Context, s *Scope, spec *ast.TypeSpe
 
 	tlog.Printw("type", "name", spec.Name.Name, "id", id)
 
+	s.types[spec.Name.Name] = id
+
 	return nil
 }
 
 func (c *Front) compileType(ctx context.Context, s *Scope, e ast.Expr) (id ir.Type, err error) {
 	switch e := e.(type) {
 	case *ast.Ident:
+		if id, ok := s.types[e.Name]; ok {
+			return id, nil
+		}
+
 		switch e.Name {
 		case "int":
 			id = s.addType(tp.Int{Bits: 64, Signed: true})
 		default:
 			panic(e.Name)
 		}
+
+		s.types[e.Name] = id
+	case *ast.ArrayType:
+		id, err = c.compileType(ctx, s, e.Elt)
+		if err != nil {
+			return id, errors.Wrap(err, "arr elem")
+		}
+
+		l, err := c.compileExpr(ctx, s, e.Len)
+		if err != nil {
+			return id, errors.Wrap(err, "arr len")
+		}
+
+		id = s.addType(tp.Array{Elem: id, Len: l})
+	case *ast.StarExpr:
+		id, err = c.compileType(ctx, s, e.X)
+		if err != nil {
+			return id, errors.Wrap(err, "")
+		}
+
+		x := tp.Ptr{X: s.Exprs[id].(tp.Type)}
+		id = s.addType(x)
+	case *ast.StructType:
+		x := tp.Struct{}
+
+		for _, f := range e.Fields.List {
+			ft, err := c.compileType(ctx, s, f.Type)
+			if err != nil {
+				return -1, errors.Wrap(err, "field type: %v", f.Type)
+			}
+
+			if len(f.Names) == 0 {
+				x.Fields = append(x.Fields, tp.StructField{
+					Name:   "",
+					Offset: 0,
+					Type:   s.Exprs[ft].(tp.Type),
+				})
+			}
+
+			for _, n := range f.Names {
+				x.Fields = append(x.Fields, tp.StructField{
+					Name:   n.Name,
+					Offset: 0,
+					Type:   s.Exprs[ft].(tp.Type),
+				})
+			}
+		}
+
+		id = s.addType(x)
 	default:
 		panic(fmt.Sprintf("%T: %[1]v", e))
 	}
@@ -867,6 +986,8 @@ func (s *Scope) define(name string, id ir.Expr) {
 		s.defs = map[string]definition{}
 	}
 
+	tlog.V("vars").Printw("define var", "ptr", s.ptr(), "def", s.def, "name", name, "id", id, "from", loc.Callers(1, 3))
+
 	s.defs[name] = s.def
 	s.vars[s.def] = id
 	s.def++
@@ -878,13 +999,21 @@ func (s *Scope) assign(name string, id ir.Expr) {
 		panic(name)
 	}
 
+	tlog.V("vars").Printw("assign var", "ptr", s.ptr(), "def", def, "name", name, "id", id, "from", loc.Callers(1, 3))
+
 	s.vars[def] = id
 }
 
-func (s *Scope) value(name string) ir.Expr {
+func (s *Scope) value(name string) (id ir.Expr) {
 	def, ok := s.findDef(name, s.depth)
 	if !ok {
 		panic(name)
+	}
+
+	if tlog.If("vars") {
+		defer func() {
+			tlog.Printw("get var", "ptr", s.ptr(), "def", def, "name", name, "id", id, "from", loc.Callers(1, 3))
+		}()
 	}
 
 	return s.findValue(def, nil)
@@ -1095,15 +1224,7 @@ func (p *pkgContext) typeid() ir.Type {
 }
 
 func (p *pkgContext) addType(x any) ir.Type {
-	tp, ok := p.types[x]
-	if ok {
-		return tp
-	}
-
-	tp = ir.Type(p.alloc(x, -1))
-	p.types[x] = tp
-
-	return tp
+	return ir.Type(p.alloc(x, -1))
 }
 
 func (p *pkgContext) label() ir.Label {

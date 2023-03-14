@@ -69,16 +69,22 @@ type (
 		X Expr
 	}
 
-	Index struct {
-		X, I Expr
+	Deref struct {
+		Ptr Expr
 	}
 
-	Field struct {
-		X Expr
-		I int
+	Offset struct { // result is pointer
+		Base   Expr // pointer
+		Offset Expr
+		Size   Expr
 	}
 
-	Struct struct {
-		Fields []Expr
+	Alloc struct {
+		Type Type
+	}
+
+	Assign struct {
+		Ptr Expr
+		Val Expr
 	}
 )

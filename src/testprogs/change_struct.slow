@@ -4,12 +4,12 @@ type A struct {
 	B int
 }
 
-func main() {
-	a := &A{B: 1}
+func main(arg int) int {
+	a := &A{B: arg}
 
 	f(a)
 
-	_ = a.B
+	return a.B
 }
 
 func f(a *A) {
