@@ -6,7 +6,7 @@ require (
 	github.com/nikandfor/cli v0.0.0-20230121181006-bff919e33603
 	github.com/nikandfor/errors v0.7.0
 	github.com/nikandfor/loc v0.4.0
-	github.com/nikandfor/tlog v0.14.2-0.20230310101652-a343e72623ae
+	github.com/nikandfor/tlog v0.14.2-0.20230310122847-69107b53e1d8
 	github.com/stretchr/testify v1.8.1
 )
 

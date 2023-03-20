@@ -16,6 +16,7 @@ What I cannot create, I do not understand.
 * *Rob Pike* - Concurrency Is Not Parallelism ([youtube](https://www.youtube.com/watch?v=qmg1CF3gZQ0))
 * *Rob Pike* - The Design of the Go Assembler ([youtube](https://www.youtube.com/watch?v=KINIAgRpkDA), [slides](https://talks.golang.org/2016/asm.slide))
 * *Rob Pike* on the move from C to Go in the toolchain ([youtube](https://www.youtube.com/watch?v=cF1zJYkBW4A))
+* *Allan Blomquist* - A demonstration of the internal programming and debugging tools (program state history) ([youtube](https://www.youtube.com/watch?v=72y2EC5fkcE))
 
 ## Papers
 

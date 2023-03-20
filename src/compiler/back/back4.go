@@ -11,6 +11,7 @@ import (
 	"github.com/nikandfor/tlog"
 	"github.com/slowlang/slow/src/compiler/bitmap"
 	"github.com/slowlang/slow/src/compiler/ir"
+	"github.com/slowlang/slow/src/compiler/tp"
 )
 
 type (
@@ -71,7 +72,7 @@ func (c *Compiler) CompilePackage(ctx context.Context, a Arch, b []byte, pkg *ir
 		tlog.Printw("package", "name", path.Base(p.Path), "path", p.Path)
 
 		for id, x := range p.Exprs {
-			tlog.Printw("expr", "id", id, "typ", tlog.NextIsType, x, "val", x)
+			tlog.Printw("expr", "id", id, "tp", p.EType[id], "typ", tlog.NextIsType, x, "val", x)
 		}
 	}
 
@@ -104,7 +105,7 @@ _start:
 }
 
 func (c *Compiler) compileFunc(ctx context.Context, b []byte, p *pkgContext, f *ir.Func) (_ []byte, err error) {
-	tlog.Printw("compile func", "name", f.Name, "in", f.In, "out", f.Out)
+	tlog.Printw("compile func", "name", f.Name, "in", f.In, "out", f.Out, "state_in", f.StateIn, "state_out", f.StateOut)
 
 	if tlog.If("dump_func_src") {
 		for i, id := range f.Code {
@@ -362,10 +363,10 @@ func (c *Compiler) buildGraph(ctx context.Context, p *pkgContext, f *ir.Func) (e
 			d.Set(int(id))
 
 			switch x := x.(type) {
-			case ir.Imm, ir.Args, ir.Out:
+			case ir.Imm, ir.Args, ir.Out, ir.State:
 			case ir.Cmp, ir.Add, ir.Sub, ir.Mul:
-			case ir.Data, ir.Ptr, ir.Deref, ir.Offset:
-			case ir.Assign:
+			case ir.Ptr, ir.Load, ir.Offset:
+			case ir.Store:
 			case ir.Alloc:
 			case ir.Label:
 				d.Or(labelhave[x])
@@ -381,15 +382,16 @@ func (c *Compiler) buildGraph(ctx context.Context, p *pkgContext, f *ir.Func) (e
 				d.Set(int(id))
 			case ir.Call:
 				// TODO
+			case tp.Array, tp.Int:
 			default:
 				panic(x)
 			}
 
 			if tlog.If("slot_pass") {
-				switch x.(type) {
-				case ir.Label, ir.B, ir.BCond:
-					tlog.Printw("forward pass", "run", run, "id", id, "slots", d)
-				}
+				//	switch x.(type) {
+				//	case ir.Label, ir.B, ir.BCond:
+				tlog.Printw("forward pass", "run", run, "id", id, "slots", d)
+				//	}
 			}
 
 			if run != 0 {
@@ -426,10 +428,10 @@ func (c *Compiler) buildGraph(ctx context.Context, p *pkgContext, f *ir.Func) (e
 			}
 
 			if tlog.If("slot_pass") {
-				switch x.(type) {
-				case ir.Label, ir.B, ir.BCond:
-					tlog.Printw("backward pass", "run", run, "id", id, "slots", d)
-				}
+				//	switch x.(type) {
+				//	case ir.Label, ir.B, ir.BCond:
+				tlog.Printw("backward pass", "run", run, "id", id, "slots", d)
+				//	}
 			}
 
 			if run != 0 {
@@ -440,8 +442,10 @@ func (c *Compiler) buildGraph(ctx context.Context, p *pkgContext, f *ir.Func) (e
 				}
 			}
 
+			d.Clear(int(id))
+
 			switch x := x.(type) {
-			case ir.Imm, ir.Args, ir.Out:
+			case ir.Imm, ir.Args, ir.Out, ir.State:
 			case ir.Label:
 				labelneed[x] = d.Copy()
 			case ir.Phi:
@@ -461,22 +465,22 @@ func (c *Compiler) buildGraph(ctx context.Context, p *pkgContext, f *ir.Func) (e
 				dset(x.L, x.R)
 			case ir.Call:
 				dset(x.Args...)
-			case ir.Data:
 			case ir.Ptr:
 				dset(x.X)
-			case ir.Deref:
+			case ir.Load:
 				dset(x.Ptr)
 			case ir.Offset:
 				dset(x.Base, x.Offset /*, x.Size*/)
-			case ir.Assign:
+			case ir.Store:
 				dset(x.Ptr, x.Val)
 			case ir.Alloc:
 			//	dset(x.Type)
+			case tp.Int:
+			case tp.Array:
+				dset(ir.Expr(x.Elem), x.Len)
 			default:
 				panic(x)
 			}
-
-			d.Clear(int(id))
 		}
 
 		tlog.V("slot_pass").Printw("backward, label need", "labelheed", labelneed)
@@ -603,7 +607,7 @@ func (c *Compiler) colorGraph(ctx context.Context, p *pkgContext, f *ir.Func) (e
 		x := p.Exprs[id]
 
 		switch x.(type) {
-		case ir.Label, ir.B, ir.BCond:
+		case ir.Label, ir.B, ir.BCond, ir.State, ir.Store:
 			continue
 		default:
 		}
@@ -873,6 +877,19 @@ func (c *Compiler) colorGraph(ctx context.Context, p *pkgContext, f *ir.Func) (e
 
 		id := findV(i)
 
+		if !p.slots[id].IsSet(int(id)) {
+			tlog.Printw("skip unused expr", "id", id)
+
+			if l[i] != 1 {
+				l[i+1] = l[i] - 1
+			}
+
+			l[i] = 1
+			i++
+
+			continue
+		}
+
 		color(id)
 
 		if l[i] != 1 {
@@ -893,7 +910,7 @@ func (c *Compiler) colorGraph(ctx context.Context, p *pkgContext, f *ir.Func) (e
 		}
 	}
 
-	tlog.Printw("registers allocated", "name", f.Name, "in", f.In, "out", f.Out)
+	tlog.Printw("registers allocated", "name", f.Name, "in", f.In, "out", f.Out, "state_in", f.StateIn, "state_out", f.StateOut)
 
 	for _, id := range f.Code {
 		x := p.Exprs[id]
@@ -1038,15 +1055,25 @@ _%[1]v:
 
 	b = append(b, '\n')
 
+	allocs := 0
+
 	for _, id := range f.Code {
 		x := p.Exprs[id]
+
+		if !p.slots[id].IsSet(int(id)) {
+			switch x.(type) {
+			case ir.Imm:
+				tlog.Printw("skip unused expr", "id", id)
+				continue
+			}
+		}
 
 		switch x := x.(type) {
 		case ir.Args:
 			b = fmt.Appendf(b, "	// reg %d  args %d  expr %d\n", reg(id), x, id)
-		case ir.Out:
+		case ir.Out, ir.State:
 		case ir.Imm:
-			b = fmt.Appendf(b, "	MOV	X%d, #%d	// expr %d\n", reg(id), x, id)
+			b = fmt.Appendf(b, "	MOV	X%d, #%d		// expr %d\n", reg(id), x, id)
 		case ir.Add:
 			b = fmt.Appendf(b, "	ADD	X%d, X%d, X%d	// expr %d\n", reg(id), reg(x.L), reg(x.R), id)
 		case ir.Sub:
@@ -1109,17 +1136,20 @@ _%[1]v:
 			} else {
 				panic(sz)
 			}
-		case ir.Assign:
+		case ir.Store:
 			b = fmt.Appendf(b, "	STR	X%d, [X%d]	// expr %d\n", reg(x.Val), reg(x.Ptr), id)
 		case ir.Alloc:
-			b = fmt.Appendf(b, "	SUB	SP, #32		// expr %d\n", id)
+			b = fmt.Appendf(b, "	SUB	SP, SP, #32	// alloc\n")
 			b = fmt.Appendf(b, "	MOV	X%d, SP		// expr %d\n", reg(id), id)
-		case ir.Deref:
+
+			allocs += 32
+		case ir.Load:
 			b = fmt.Appendf(b, "	LDR	X%d, [X%d]	// expr %d\n", reg(id), reg(x.Ptr), id)
 
 			//	case ir.Data:
 			//	case ir.Ptr:
 			//		b = fmt.Appendf(b, "	ADR	X%d, .data.%d	// expr %d\n", reg(id), x.X, id)
+		case tp.Array:
 		default:
 			panic(x)
 		}
@@ -1130,6 +1160,10 @@ _%[1]v:
 	}
 
 	b = append(b, '\n')
+
+	if allocs != 0 {
+		b = fmt.Appendf(b, "	MOV	SP, FP		// free\n")
+	}
 
 	for stReg -= 2; stReg >= p.calleeSaved; stReg -= 2 {
 		b = fmt.Appendf(b, "	LDP     X%d, X%d, [SP], #16\n", stReg, stReg+1)
@@ -1145,9 +1179,10 @@ _%[1]v:
 		x := p.Exprs[id]
 
 		switch x := x.(type) {
-		case ir.Data:
-			b = fmt.Appendf(b, ".data.%d:\n	.asciz %q\n", id, x)
+		//	case ir.Data:
+		//		b = fmt.Appendf(b, ".data.%d:\n	.asciz %q\n", id, x)
 		default:
+			_ = x
 		}
 	}
 

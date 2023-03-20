@@ -3,8 +3,9 @@ package tp
 import "github.com/slowlang/slow/src/compiler/ir"
 
 type (
-	Name string
 	Type = ir.Type
+
+	Basic struct{}
 
 	Func struct {
 		In  []Type

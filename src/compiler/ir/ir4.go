@@ -4,13 +4,15 @@ type (
 	Expr int
 	Type int
 
-	Args  int
-	Cond  string
-	Data  string
+	Args int
+	Cond string
+	//	Data  string
 	Imm   int64
 	Label int
 	Out   Expr
 	Zero  struct{}
+
+	State Expr
 
 	ABI int
 
@@ -26,8 +28,10 @@ type (
 	Func struct {
 		Name string
 
-		In  []Type
+		In  []Expr
 		Out []Expr
+
+		StateIn, StateOut State
 
 		Code []Expr
 	}
@@ -69,10 +73,6 @@ type (
 		X Expr
 	}
 
-	Deref struct {
-		Ptr Expr
-	}
-
 	Offset struct { // result is pointer
 		Base   Expr // pointer
 		Offset Expr
@@ -83,8 +83,14 @@ type (
 		Type Type
 	}
 
-	Assign struct {
-		Ptr Expr
-		Val Expr
+	Store struct {
+		Ptr   Expr
+		Val   Expr
+		State State
+	}
+
+	Load struct {
+		Ptr   Expr
+		State State
 	}
 )

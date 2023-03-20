@@ -57,16 +57,24 @@ type (
 		defs map[string]definition
 		vars map[definition]ir.Expr
 
+		state ir.State
+
 		phi  []ir.Expr
 		code []ir.Expr
 
 		retvals []ir.Expr
 		valuef  func(definition, visitSet) ir.Expr
+		statef  func(visitSet) ir.State
 	}
 
 	definition int
 
 	visitSet map[*Scope]struct{}
+)
+
+const (
+	walkNotFound = -1 - iota
+	walkCycled
 )
 
 func (c *Front) Compile(ctx context.Context) (_ *ir.Package, err error) {
@@ -80,7 +88,7 @@ func (c *Front) Compile(ctx context.Context) (_ *ir.Package, err error) {
 	s.from = loc.Caller(0)
 	p.root = s
 
-	p.unty = s.addType(tp.Untyped{})
+	p.unty = s.addType(tp.Untyped{}, -1)
 	p.zero = s.alloc(ir.Zero{}, p.unty)
 	p.self = s.alloc(p.Package, p.unty)
 
@@ -175,82 +183,79 @@ func (c *Front) compileTask(ctx context.Context, s *Scope, d any) (err error) {
 	}
 }
 
-func (c *Front) compileFunc(ctx context.Context, s *Scope, fn *ast.FuncDecl) (fid ir.Expr, err error) {
+//
+
+func (c *Front) compileFunc(ctx context.Context, par *Scope, fn *ast.FuncDecl) (fid ir.Expr, err error) {
 	f := &ir.Func{
 		Name: fn.Name.Name,
 	}
 	tp := &tp.Func{}
 
-	s = s.nextScope(-1, 1, s)
+	s := par.nextScope(-1, 1, par)
 	s.funContext = &funContext{
 		Func: f,
 	}
 
-	argsStart := ir.Expr(-1)
+	ftp := par.addType(tp, -1)
+	fid = par.alloc(f, ftp)
+	s.Funcs = append(s.Funcs, fid)
 
 	for _, p := range fn.Type.Params.List {
-		ptp, err := c.compileType(ctx, s, p.Type)
+		ptp, err := c.compileType(ctx, par, p.Type)
 		if err != nil {
 			return -1, errors.Wrap(err, "param type")
 		}
 
 		if len(p.Names) == 0 {
-			id := s.addTyped(ir.Out(len(f.In)), ptp)
-			f.In = append(f.In, ptp)
-
-			if len(f.In) == 1 {
-				argsStart = id
-			}
-
-			// TODO
-			//tp.In = append(tp.In, p.Exprs[ptp].(tp.Type))
+			id := s.add(ir.Out(len(f.In)), ptp)
+			f.In = append(f.In, id)
+			tp.In = append(tp.In, ir.Type(ptp))
 
 			continue
 		}
 
 		for _, name := range p.Names {
-			id := s.addTyped(ir.Out(len(f.In)), ptp)
-			f.In = append(f.In, ptp)
-
-			if len(f.In) == 1 {
-				argsStart = id
-			}
+			id := s.add(ir.Out(len(f.In)), ptp)
+			f.In = append(f.In, id)
+			tp.In = append(tp.In, ir.Type(ptp))
 
 			s.define(name.Name, id)
 		}
 	}
 
-	if len(f.In) > 0 {
-		s.Exprs[argsStart] = ir.Args(len(f.In))
+	f.StateIn = ir.State(s.add(ir.State(len(f.In)), -1))
+	s.state = f.StateIn
+
+	if len(f.In) != 0 {
+		s.Exprs[f.In[0]] = ir.Args(len(f.In))
 	}
 
 	if fn.Type.Results != nil {
 		for _, p := range fn.Type.Results.List {
-			ptp, err := c.compileType(ctx, s, p.Type)
+			ptp, err := c.compileType(ctx, par, p.Type)
 			if err != nil {
 				return -1, errors.Wrap(err, "param type")
 			}
 
-			_ = ptp // TODO
-
 			if len(p.Names) == 0 {
 				f.Out = append(f.Out, -1)
+				tp.Out = append(tp.Out, ir.Type(ptp))
 				continue
 			}
 
 			for _, name := range p.Names {
 				f.Out = append(f.Out, -1)
+				tp.Out = append(tp.Out, ir.Type(ptp))
 
 				s.define(name.Name, s.zero)
 			}
 		}
 	}
 
-	ftp := s.addType(tp)
-	fid = s.alloc(f, ftp)
-	s.Funcs = append(s.Funcs, fid)
+	s.Exprs[ftp] = tp
+	s.Exprs[fid] = f
 
-	tlog.Printw("compile func", "name", f.Name, "id", fid, "typ", ftp)
+	tlog.Printw("compile func", "name", f.Name, "expr", fid, "typ", ftp)
 
 	s.exit = s.nextScope(s.label(), 0)
 
@@ -271,20 +276,22 @@ func (c *Front) compileFunc(ctx context.Context, s *Scope, fn *ast.FuncDecl) (fi
 		f.Out[i] = s.exit.addphi(phi)
 	}
 
-	tlog.Printw("func scopes", "name", f.Name, "out", f.Out)
+	f.StateOut = s.exit.findState(nil)
 
-	s.exit.walk(func(s *Scope) {
-		fmtFrom := func(pc loc.PC) string {
-			if pc == 0 {
-				return ""
-			}
+	tlog.Printw("func scopes", "name", f.Name, "in", f.In, "out", f.Out)
 
-			name, _, line := pc.NameFileLine()
-			name = path.Ext(name)
-
-			return fmt.Sprintf("%s:%d", name, line)
+	fmtFrom := func(pc loc.PC) string {
+		if pc == 0 {
+			return ""
 		}
 
+		name, _, line := pc.NameFileLine()
+		name = path.Ext(name)
+
+		return fmt.Sprintf("%s:%d", name, line)
+	}
+
+	printScope := func(s *Scope) {
 		args := []interface{}{"ptr", s.ptr(), "d", s.depth}
 		args = append(args, "from", fmtFrom(s.from))
 		args = append(args, "prev", s.prevPtr())
@@ -304,26 +311,37 @@ func (c *Front) compileFunc(ctx context.Context, s *Scope, fn *ast.FuncDecl) (fi
 
 		tlog.Printw("scope", args...)
 
+		for _, id := range s.phi {
+			x := s.Exprs[id]
+			tp := s.EType[id]
+			tlog.Printw("phi", "id", id, "tp", tp, "typ", tlog.NextIsType, x, "val", x)
+		}
+
+		for _, id := range s.code {
+			x := s.Exprs[id]
+			tp := s.EType[id]
+
+			tlog.Printw("code", "id", id, "tp", tp, "typ", tlog.NextIsType, x, "val", x)
+		}
+	}
+
+	par.walk(printScope)
+
+	s.exit.walk(func(s *Scope) {
+		printScope(s)
+
 		if s.lab != -1 {
 			f.Code = append(f.Code, s.labid)
 		}
 
 		for _, id := range s.phi {
-			x := s.Exprs[id]
-
-			tlog.Printw("phi", "id", id, "typ", tlog.NextIsType, x, "val", x)
-
 			f.Code = append(f.Code, id)
 		}
 
 		for _, id := range s.code {
-			x := s.Exprs[id]
-
-			tlog.Printw("code", "id", id, "typ", tlog.NextIsType, x, "val", x)
-
 			f.Code = append(f.Code, id)
 		}
-	})
+	}, par)
 
 	return fid, nil
 }
@@ -345,7 +363,7 @@ func (c *Front) compileStmt(ctx context.Context, s *Scope, x ast.Stmt) (_ *Scope
 		ids := make([]ir.Expr, len(x.Results))
 
 		for i, e := range x.Results {
-			ids[i], err = c.compileExpr(ctx, s, e)
+			ids[i], err = c.compileExpr(ctx, s, e, false)
 			if err != nil {
 				return nil, errors.Wrap(err, "return value")
 			}
@@ -362,7 +380,7 @@ func (c *Front) compileStmt(ctx context.Context, s *Scope, x ast.Stmt) (_ *Scope
 		ids := make([]ir.Expr, len(x.Rhs))
 
 		for i, e := range x.Rhs {
-			ids[i], err = c.compileExpr(ctx, s, e)
+			ids[i], err = c.compileExpr(ctx, s, e, false)
 			if err != nil {
 				return nil, errors.Wrap(err, "assignment rhs")
 			}
@@ -381,23 +399,28 @@ func (c *Front) compileStmt(ctx context.Context, s *Scope, x ast.Stmt) (_ *Scope
 				continue
 			}
 
-			ptr, err := c.compileLExpr(ctx, s, e)
+			ptr, err := c.compileExpr(ctx, s, e, true)
 			if err != nil {
 				return nil, errors.Wrap(err, "lexpr")
 			}
 
-			_ = s.add(ir.Assign{
-				Ptr: ptr,
-				Val: ids[i],
-			})
+			ss := s.findState(nil)
+
+			id := s.add(ir.Store{
+				Ptr:   ptr,
+				Val:   ids[i],
+				State: ss,
+			}, -1)
+
+			s.state = ir.State(id)
 		}
 	case *ast.IncDecStmt:
-		id, err := c.compileExpr(ctx, s, x.X)
+		id, err := c.compileExpr(ctx, s, x.X, false)
 		if err != nil {
 			return s, errors.Wrap(err, "inc expr")
 		}
 
-		one := s.addTyped(ir.Imm(1), s.unty)
+		one := s.add(ir.Imm(1), s.unty)
 
 		var op any
 
@@ -407,22 +430,27 @@ func (c *Front) compileStmt(ctx context.Context, s *Scope, x ast.Stmt) (_ *Scope
 			op = ir.Sub{L: id, R: one}
 		}
 
-		id = s.addTyped(op, s.EType[id])
+		id = s.add(op, s.EType[id])
 
 		if v, ok := x.X.(*ast.Ident); ok {
 			s.assign(v.Name, id)
 			break
 		}
 
-		ptr, err := c.compileLExpr(ctx, s, x.X)
+		ptr, err := c.compileExpr(ctx, s, x.X, true)
 		if err != nil {
 			return nil, errors.Wrap(err, "lexpr")
 		}
 
-		_ = s.add(ir.Assign{
-			Ptr: ptr,
-			Val: id,
-		})
+		ss := s.findState(nil)
+
+		id = s.add(ir.Store{
+			Ptr:   ptr,
+			Val:   id,
+			State: ss,
+		}, -1)
+
+		s.state = ir.State(id)
 	case *ast.IfStmt:
 		s, err = c.compileIf(ctx, s, x)
 		if err != nil {
@@ -445,7 +473,7 @@ func (c *Front) compileStmt(ctx context.Context, s *Scope, x ast.Stmt) (_ *Scope
 	case *ast.ExprStmt:
 		tlog.Printw("expr stmt", "pos", x.Pos(), "val", x)
 
-		id, err := c.compileExpr(ctx, s, x.X)
+		id, err := c.compileExpr(ctx, s, x.X, false)
 		if err != nil {
 			return nil, errors.Wrap(err, "expr stmt")
 		}
@@ -477,7 +505,7 @@ func (c *Front) compileIf(ctx context.Context, prev *Scope, x *ast.IfStmt) (_ *S
 			Expr:  condExpr,
 			Cond:  cond,
 			Label: lab,
-		})
+		}, -1)
 
 		switch qq := q.Else.(type) {
 		case *ast.BlockStmt:
@@ -486,7 +514,7 @@ func (c *Front) compileIf(ctx context.Context, prev *Scope, x *ast.IfStmt) (_ *S
 
 			scond.add(ir.B{
 				Label: lab,
-			})
+			}, -1)
 
 			q = nil
 		case nil:
@@ -542,24 +570,26 @@ func (c *Front) compileIf(ctx context.Context, prev *Scope, x *ast.IfStmt) (_ *S
 }
 
 func (c *Front) compileFor(ctx context.Context, prev *Scope, x *ast.ForStmt) (_ *Scope, err error) {
-	var scond, sbody, send *Scope
+	var scond, sbody, snext *Scope
 
 	if x.Cond != nil {
 		scond = prev.nextScope(prev.label(), 1, prev)
 		sbody = prev.nextScope(prev.label(), 2, scond)
-		send = prev.nextScope(prev.label(), 0, scond)
+		snext = prev.nextScope(prev.label(), 0, scond)
 	} else {
 		scond = prev.nextScope(prev.label(), 1, prev)
 		sbody = scond
-		send = prev.nextScope(prev.label(), 0)
+		snext = prev.nextScope(prev.label(), 0)
 	}
 
 	phi := map[definition]ir.Expr{}
 
 	scond.valuef = func(def definition, visited visitSet) (id ir.Expr) {
-		defer func() {
-			tlog.Printw("custom value", "ptr", scond.ptr(), "d", scond.depth, "def", def, "id", id, "from", loc.Callers(2, 3))
-		}()
+		if tlog.If("custom_value") {
+			defer func() {
+				tlog.Printw("custom value", "ptr", scond.ptr(), "d", scond.depth, "def", def, "id", id, "from", loc.Callers(2, 3))
+			}()
+		}
 
 		id, ok := phi[def]
 		if ok {
@@ -583,8 +613,37 @@ func (c *Front) compileFor(ctx context.Context, prev *Scope, x *ast.ForStmt) (_ 
 		}
 	}()
 
+	stateOut := ir.State(-1)
+	scond.statef = func(visited visitSet) (id ir.State) {
+		if tlog.If("custom_value") {
+			defer func() {
+				tlog.Printw("custom state", "ptr", scond.ptr(), "d", scond.depth, "def", tlog.None, "id", id, "from", loc.Callers(2, 3))
+			}()
+		}
+
+		if stateOut != -1 {
+			return stateOut
+		}
+
+		id = ir.State(scond.addphi(ir.Phi{}))
+		stateOut = id
+
+		return id
+	}
+
+	defer func() {
+		scond.statef = nil
+
+		if stateOut == -1 {
+			return
+		}
+
+		scond.Exprs[stateOut] = scond.mergeStates(nil)
+		scond.state = stateOut
+	}()
+
 	sbody.cont = scond
-	sbody.brea = send
+	sbody.brea = snext
 
 	// cond
 
@@ -599,8 +658,8 @@ func (c *Front) compileFor(ctx context.Context, prev *Scope, x *ast.ForStmt) (_ 
 		scond.add(ir.BCond{
 			Expr:  condExpr,
 			Cond:  revcond(cond),
-			Label: send.lab,
-		})
+			Label: snext.lab,
+		}, -1)
 
 		scond.branchTo(sbody)
 	}
@@ -615,9 +674,9 @@ func (c *Front) compileFor(ctx context.Context, prev *Scope, x *ast.ForStmt) (_ 
 	sbodyEnd.branchTo(scond)
 
 	tlog.Printw("for prev", "p", prev.ptr())
-	tlog.Printw("for next", "p", send.ptr())
+	tlog.Printw("for next", "p", snext.ptr())
 
-	return send, nil
+	return snext, nil
 }
 
 func (c *Front) compileCond(ctx context.Context, s *Scope, e ast.Expr) (cc ir.Cond, id ir.Expr, err error) {
@@ -633,44 +692,12 @@ func (c *Front) compileCond(ctx context.Context, s *Scope, e ast.Expr) (cc ir.Co
 		return "", -1, errors.New("unsupported expr: %T", e)
 	}
 
-	id, err = c.compileExpr(ctx, s, e)
+	id, err = c.compileExpr(ctx, s, e, false)
 
 	return
 }
 
-func (c *Front) compileLExpr(ctx context.Context, s *Scope, e ast.Expr) (id ir.Expr, err error) {
-	switch e := e.(type) {
-	case *ast.Ident:
-		id = s.value(e.Name)
-		if id == -1 {
-			// TODO
-			panic(e.Name)
-			//	return id, errors.New("undefined var: %s", e)
-		}
-	case *ast.IndexExpr:
-		base, err := c.compileLExpr(ctx, s, e.X)
-		if err != nil {
-			return 0, errors.Wrap(err, "index base")
-		}
-
-		idx, err := c.compileExpr(ctx, s, e.Index)
-		if err != nil {
-			return 0, errors.Wrap(err, "index idx")
-		}
-
-		id = s.add(ir.Offset{
-			Base:   base,
-			Offset: idx,
-			Size:   s.add(ir.Imm(8)),
-		})
-	default:
-		panic(fmt.Sprintf("%T: %[1]v", e))
-	}
-
-	return id, nil
-}
-
-func (c *Front) compileExpr(ctx context.Context, s *Scope, e ast.Expr) (id ir.Expr, err error) {
+func (c *Front) compileExpr(ctx context.Context, s *Scope, e ast.Expr, lvalue bool) (id ir.Expr, err error) {
 	switch e := e.(type) {
 	case *ast.Ident:
 		id = s.value(e.Name)
@@ -687,38 +714,42 @@ func (c *Front) compileExpr(ctx context.Context, s *Scope, e ast.Expr) (id ir.Ex
 				return -1, errors.Wrap(err, "")
 			}
 
-			id = s.add(ir.Imm(x))
+			id = s.add(ir.Imm(x), s.unty)
 		case token.STRING:
+			panic(e.Value)
+
 			data, err := strconv.Unquote(e.Value)
 			if err != nil {
 				panic(err)
 			}
 
-			id = s.add(ir.Data(data + "\000")) // TODO
-			id = s.add(ir.Ptr{X: id})
+			_ = data
+
+		//	id = s.add(ir.Data(data + "\000")) // TODO
+		//	id = s.add(ir.Ptr{X: id})
 		//	id = s.add(ir.Struct{id, s.add(ir.Imm(len(data)))})
 		default:
 			panic(e.Kind)
 		}
 	case *ast.UnaryExpr:
-		id, err = c.compileExpr(ctx, s, e.X)
+		id, err = c.compileExpr(ctx, s, e.X, e.Op == token.AND)
 		if err != nil {
 			return -1, errors.Wrap(err, "operand")
 		}
 
 		switch e.Op {
 		case token.AND:
-			id = s.add(ir.Ptr{X: id})
+		//	id = s.add(ir.Ptr{X: id})
 		default:
 			panic(e.Op)
 		}
 	case *ast.BinaryExpr:
-		l, err := c.compileExpr(ctx, s, e.X)
+		l, err := c.compileExpr(ctx, s, e.X, false)
 		if err != nil {
 			return -1, errors.Wrap(err, "op lhs")
 		}
 
-		r, err := c.compileExpr(ctx, s, e.Y)
+		r, err := c.compileExpr(ctx, s, e.Y, false)
 		if err != nil {
 			return -1, errors.Wrap(err, "op rhs")
 		}
@@ -750,46 +781,33 @@ func (c *Front) compileExpr(ctx context.Context, s *Scope, e ast.Expr) (id ir.Ex
 			panic(e.Op)
 		}
 
-		id = s.add(op)
+		id = s.add(op, s.EType[l])
 	case *ast.IndexExpr:
-		x, err := c.compileExpr(ctx, s, e.X)
+		var base ir.Expr
+
+		base, err = c.compileExpr(ctx, s, e.X, true)
 		if err != nil {
-			return -1, errors.Wrap(err, "index base")
+			return 0, errors.Wrap(err, "index base")
 		}
 
-		idx, err := c.compileExpr(ctx, s, e.Index)
+		idx, err := c.compileExpr(ctx, s, e.Index, false)
 		if err != nil {
-			return -1, errors.Wrap(err, "index base")
+			return 0, errors.Wrap(err, "index idx")
 		}
 
-		size := s.add(ir.Imm(8))
-
-		op := ir.Offset{
-			Base:   x,
+		id = s.add(ir.Offset{
+			Base:   base,
 			Offset: idx,
-			Size:   size,
+			Size:   s.add(ir.Imm(8), s.unty),
+		}, s.EType[base])
+
+		if lvalue {
+			break
 		}
 
-		id = s.add(op)
+		ss := s.findState(nil)
 
-		id = s.add(ir.Deref{Ptr: id})
-	case *ast.SelectorExpr:
-		x, err := c.compileExpr(ctx, s, e.X)
-		if err != nil {
-			return -1, errors.Wrap(err, "selector base")
-		}
-
-		tlog.Printw("selector expr", "x", e.X, "sel", e.Sel)
-
-		off := s.add(ir.Imm(0))
-
-		op := ir.Offset{
-			Base:   x,
-			Offset: off,
-			Size:   s.add(ir.Imm(8)),
-		}
-
-		id = s.add(op)
+		id = s.add(ir.Load{Ptr: id, State: ss}, -1)
 	case *ast.CallExpr:
 		n := e.Fun.(*ast.Ident)
 
@@ -801,16 +819,16 @@ func (c *Front) compileExpr(ctx context.Context, s *Scope, e ast.Expr) (id ir.Ex
 		}
 
 		for i, a := range e.Args {
-			x.Args[i], err = c.compileExpr(ctx, s, a)
+			x.Args[i], err = c.compileExpr(ctx, s, a, false)
 			if err != nil {
 				return -1, errors.Wrap(err, "op lhs")
 			}
 		}
 
-		id = s.add(x)
+		id = s.add(x, -1)
 
 		for i := 1; i < len(fdef.Out); i++ {
-			s.add(ir.Out(i))
+			s.add(ir.Out(i), -1)
 		}
 	case *ast.CompositeLit:
 		tp, err := c.compileType(ctx, s, e.Type)
@@ -818,11 +836,7 @@ func (c *Front) compileExpr(ctx context.Context, s *Scope, e ast.Expr) (id ir.Ex
 			return 0, errors.Wrap(err, "type")
 		}
 
-		id = s.add(ir.Alloc{Type: tp})
-
-		if e.Incomplete {
-			panic(e)
-		}
+		id = s.add(ir.Alloc{Type: tp}, tp)
 	default:
 		panic(fmt.Sprintf("%T: %[1]v", e))
 	}
@@ -852,7 +866,7 @@ func (c *Front) compileType(ctx context.Context, s *Scope, e ast.Expr) (id ir.Ty
 
 		switch e.Name {
 		case "int":
-			id = s.addType(tp.Int{Bits: 64, Signed: true})
+			id = s.addType(tp.Int{Bits: 64, Signed: true}, -1)
 		default:
 			panic(e.Name)
 		}
@@ -864,12 +878,12 @@ func (c *Front) compileType(ctx context.Context, s *Scope, e ast.Expr) (id ir.Ty
 			return id, errors.Wrap(err, "arr elem")
 		}
 
-		l, err := c.compileExpr(ctx, s, e.Len)
+		l, err := c.compileExpr(ctx, s, e.Len, false)
 		if err != nil {
 			return id, errors.Wrap(err, "arr len")
 		}
 
-		id = s.addType(tp.Array{Elem: id, Len: l})
+		id = s.addType(tp.Array{Elem: id, Len: l}, -1)
 	case *ast.StarExpr:
 		id, err = c.compileType(ctx, s, e.X)
 		if err != nil {
@@ -877,7 +891,7 @@ func (c *Front) compileType(ctx context.Context, s *Scope, e ast.Expr) (id ir.Ty
 		}
 
 		x := tp.Ptr{X: s.Exprs[id].(tp.Type)}
-		id = s.addType(x)
+		id = s.addType(x, -1)
 	case *ast.StructType:
 		x := tp.Struct{}
 
@@ -904,7 +918,7 @@ func (c *Front) compileType(ctx context.Context, s *Scope, e ast.Expr) (id ir.Ty
 			}
 		}
 
-		id = s.addType(x)
+		id = s.addType(x, -1)
 	default:
 		panic(fmt.Sprintf("%T: %[1]v", e))
 	}
@@ -919,6 +933,7 @@ func rootScope(pkg *pkgContext, fun *funContext) *Scope {
 		labid:      -1,
 		lab:        -1,
 		vars:       make(map[definition]ir.Expr),
+		state:      -1,
 	}
 }
 
@@ -962,19 +977,25 @@ func (s *Scope) addphi(x any) ir.Expr {
 	return id
 }
 
-func (s *Scope) add(x any) ir.Expr {
-	id := s.pkgContext.alloc(x, -1)
+func (s *Scope) add(x any, tp ir.Type) ir.Expr {
+	id := s.pkgContext.alloc(x, tp)
 	s.code = append(s.code, id)
 
 	return id
 }
 
+func (s *Scope) addType(x any, tp ir.Type) ir.Type {
+	return ir.Type(s.add(x, tp))
+}
+
+/*
 func (s *Scope) addTyped(x any, tp ir.Type) ir.Expr {
 	id := s.pkgContext.alloc(x, tp)
 	s.code = append(s.code, id)
 
 	return id
 }
+*/
 
 func (s *Scope) define(name string, id ir.Expr) {
 	_, ok := s.findDef(name, s.depth)
@@ -1020,15 +1041,9 @@ func (s *Scope) value(name string) (id ir.Expr) {
 }
 
 func (s *Scope) findValue(def definition, visited visitSet) (id ir.Expr) {
-	if visited == nil {
-		visited = make(visitSet)
+	if !visited.Enter(s) {
+		return walkCycled
 	}
-
-	if _, ok := visited[s]; ok {
-		return -1
-	}
-
-	visited[s] = struct{}{}
 
 	if tlog.If("findValue") {
 		defer func() {
@@ -1047,7 +1062,7 @@ func (s *Scope) findValue(def definition, visited visitSet) (id ir.Expr) {
 
 	switch len(s.prev) {
 	case 0:
-		return -1
+		return walkNotFound
 	case 1:
 		return s.prev[0].findValue(def, visited)
 	}
@@ -1057,6 +1072,10 @@ func (s *Scope) findValue(def definition, visited visitSet) (id ir.Expr) {
 
 func (s *Scope) findValueMerge(def definition, visited visitSet) ir.Expr {
 	phi := s.mergeValues(def, visited)
+
+	if len(phi) == 1 {
+		return phi[0]
+	}
 
 	id := s.addphi(phi)
 	s.vars[def] = id
@@ -1069,6 +1088,9 @@ func (s *Scope) mergeValues(def definition, visited visitSet) ir.Phi {
 
 	for _, p := range s.prev {
 		id := p.findValue(def, visited)
+		if id == walkCycled {
+			continue
+		}
 
 		phi = append(phi, id)
 	}
@@ -1076,7 +1098,48 @@ func (s *Scope) mergeValues(def definition, visited visitSet) ir.Phi {
 	return phi
 }
 
-func (s *Scope) fixphi() {
+func (s *Scope) findState(visited visitSet) (id ir.State) {
+	if !visited.Enter(s) {
+		return walkCycled
+	}
+
+	if s.state >= 0 {
+		return s.state
+	}
+
+	if f := s.statef; f != nil {
+		return f(visited)
+	}
+
+	switch len(s.prev) {
+	case 0:
+		return walkNotFound
+	case 1:
+		return s.prev[0].findState(visited)
+	}
+
+	return s.findStateMerge(visited)
+}
+
+func (s *Scope) findStateMerge(visited visitSet) ir.State {
+	phi := s.mergeStates(visited)
+	id := s.addphi(phi)
+
+	s.state = ir.State(id)
+
+	return ir.State(id)
+}
+
+func (s *Scope) mergeStates(visited visitSet) ir.Phi {
+	var phi ir.Phi
+
+	for _, p := range s.prev {
+		id := p.findState(visited)
+
+		phi = append(phi, ir.Expr(id))
+	}
+
+	return phi
 }
 
 func (s *Scope) findDef(name string, depth int) (def definition, ok bool) {
@@ -1158,7 +1221,7 @@ func (s *Scope) branchTo(to *Scope) {
 		panic(to)
 	}
 
-	s.add(ir.B{Label: to.lab})
+	s.add(ir.B{Label: to.lab}, -1)
 	to.appendPrev(s)
 }
 
@@ -1186,8 +1249,12 @@ func (s *Scope) find(f func(*Scope) bool, depth int) bool {
 	return s.prev[0].find(f, s.depth)
 }
 
-func (s *Scope) walk(f func(s *Scope)) {
+func (s *Scope) walk(f func(s *Scope), stop ...*Scope) {
 	done := make(visitSet)
+
+	for _, s := range stop {
+		done.Mark(s)
+	}
 
 	var walk func(*Scope)
 	walk = func(s *Scope) {
@@ -1223,9 +1290,9 @@ func (p *pkgContext) typeid() ir.Type {
 	return ir.Type(p.id())
 }
 
-func (p *pkgContext) addType(x any) ir.Type {
-	return ir.Type(p.alloc(x, -1))
-}
+//func (p *pkgContext) addType(x any) ir.Type {
+//	return ir.Type(p.alloc(x, -1))
+//}
 
 func (p *pkgContext) label() ir.Label {
 	l := p.lab
@@ -1250,4 +1317,27 @@ func revcond(x ir.Cond) ir.Cond {
 	default:
 		panic(x)
 	}
+}
+
+func (v visitSet) Mark(s *Scope) {
+	v[s] = struct{}{}
+}
+
+func (v visitSet) Marked(s *Scope) bool {
+	_, ok := v[s]
+	return ok
+}
+
+func (v *visitSet) Enter(s *Scope) bool {
+	if *v == nil {
+		*v = make(visitSet)
+	}
+
+	if v.Marked(s) {
+		return false
+	}
+
+	v.Mark(s)
+
+	return true
 }
