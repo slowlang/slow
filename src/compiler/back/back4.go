@@ -920,7 +920,7 @@ func (c *Compiler) colorGraph(ctx context.Context, p *pkgContext, f *ir.Func) (e
 			reg = r
 		}
 
-		tlog.Printw("code", "bb", p.i2b[id], "id", id, "typ", tlog.NextIsType, x, "val", x, "reg", reg, "slots", p.slots[id])
+		tlog.Printw("code", "bb", p.i2b[id], "id", id, "tp", p.EType[id], "typ", tlog.NextIsType, x, "val", x, "reg", reg, "slots", p.slots[id])
 	}
 
 	return nil

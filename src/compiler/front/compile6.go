@@ -24,8 +24,12 @@ type (
 		root *Scope
 
 		unty ir.Type
+		stat ir.Type
+		cmpt ir.Type
+		tdef ir.Type
+		intt ir.Type
 		zero ir.Expr
-		self ir.Expr
+		//	self ir.Expr
 
 		def definition
 		lab ir.Label
@@ -88,9 +92,13 @@ func (c *Front) Compile(ctx context.Context) (_ *ir.Package, err error) {
 	s.from = loc.Caller(0)
 	p.root = s
 
-	p.unty = s.addType(tp.Untyped{}, -1)
+	p.unty = s.addType(tp.Untyped{}, 0)
+	p.stat = s.addType(tp.State{}, p.unty)
+	p.cmpt = s.addType(tp.Cmp{}, p.unty)
+	p.tdef = s.addType(tp.TypeDef{}, p.unty)
+	p.intt = s.addType(tp.Int{Signed: true}, p.unty)
 	p.zero = s.alloc(ir.Zero{}, p.unty)
-	p.self = s.alloc(p.Package, p.unty)
+	//	p.self = s.alloc(p.Package, p.unty)
 
 	for _, f := range c.files {
 		for _, d := range f.Decls {
@@ -196,7 +204,7 @@ func (c *Front) compileFunc(ctx context.Context, par *Scope, fn *ast.FuncDecl) (
 		Func: f,
 	}
 
-	ftp := par.addType(tp, -1)
+	ftp := par.addType(tp, par.tdef)
 	fid = par.alloc(f, ftp)
 	s.Funcs = append(s.Funcs, fid)
 
@@ -223,7 +231,7 @@ func (c *Front) compileFunc(ctx context.Context, par *Scope, fn *ast.FuncDecl) (
 		}
 	}
 
-	f.StateIn = ir.State(s.add(ir.State(len(f.In)), -1))
+	f.StateIn = ir.State(s.add(ir.State(len(f.In)), par.stat))
 	s.state = f.StateIn
 
 	if len(f.In) != 0 {
@@ -273,7 +281,7 @@ func (c *Front) compileFunc(ctx context.Context, par *Scope, fn *ast.FuncDecl) (
 			phi = append(phi, p.retvals[i])
 		}
 
-		f.Out[i] = s.exit.addphi(phi)
+		f.Out[i] = s.exit.addphi(phi, s.EType[phi[0]])
 	}
 
 	f.StateOut = s.exit.findState(nil)
@@ -390,6 +398,8 @@ func (c *Front) compileStmt(ctx context.Context, s *Scope, x ast.Stmt) (_ *Scope
 			tlog.V("assignment").Printw("assign", "lhs", tlog.NextIsType, x.Lhs[i], "rhs", tlog.NextIsType, x.Rhs[i], "id", ids[i])
 
 			if v, ok := e.(*ast.Ident); ok {
+				ids[i] = c.ensureTyped(ctx, s, ids[i])
+
 				if x.Tok == token.DEFINE {
 					s.define(v.Name, ids[i])
 				} else {
@@ -410,7 +420,7 @@ func (c *Front) compileStmt(ctx context.Context, s *Scope, x ast.Stmt) (_ *Scope
 				Ptr:   ptr,
 				Val:   ids[i],
 				State: ss,
-			}, -1)
+			}, s.stat)
 
 			s.state = ir.State(id)
 		}
@@ -448,7 +458,7 @@ func (c *Front) compileStmt(ctx context.Context, s *Scope, x ast.Stmt) (_ *Scope
 			Ptr:   ptr,
 			Val:   id,
 			State: ss,
-		}, -1)
+		}, s.unty)
 
 		s.state = ir.State(id)
 	case *ast.IfStmt:
@@ -505,7 +515,7 @@ func (c *Front) compileIf(ctx context.Context, prev *Scope, x *ast.IfStmt) (_ *S
 			Expr:  condExpr,
 			Cond:  cond,
 			Label: lab,
-		}, -1)
+		}, prev.unty)
 
 		switch qq := q.Else.(type) {
 		case *ast.BlockStmt:
@@ -596,7 +606,17 @@ func (c *Front) compileFor(ctx context.Context, prev *Scope, x *ast.ForStmt) (_ 
 			return id
 		}
 
-		id = scond.addphi(ir.Phi{})
+		id = prev.findValue(def, visited)
+		if id < 0 {
+			panic(id)
+		}
+
+		typ := prev.EType[id]
+		if id < 0 {
+			panic(id)
+		}
+
+		id = scond.addphi(ir.Phi{}, typ)
 		phi[def] = id
 
 		return id
@@ -608,6 +628,7 @@ func (c *Front) compileFor(ctx context.Context, prev *Scope, x *ast.ForStmt) (_ 
 		for def, id := range phi {
 			scond.vars[def] = id
 			scond.Exprs[id] = scond.mergeValues(def, nil)
+			scond.EType[id] = scond.EType[scond.Exprs[id].(ir.Phi)[0]]
 
 			tlog.Printw("fix phi", "ptr", scond.ptr(), "d", scond.depth, "def", def, "id", id, "phi", scond.Exprs[id])
 		}
@@ -625,7 +646,7 @@ func (c *Front) compileFor(ctx context.Context, prev *Scope, x *ast.ForStmt) (_ 
 			return stateOut
 		}
 
-		id = ir.State(scond.addphi(ir.Phi{}))
+		id = ir.State(scond.addphi(ir.Phi{}, prev.stat))
 		stateOut = id
 
 		return id
@@ -657,11 +678,11 @@ func (c *Front) compileFor(ctx context.Context, prev *Scope, x *ast.ForStmt) (_ 
 
 		scond.add(ir.BCond{
 			Expr:  condExpr,
-			Cond:  revcond(cond),
-			Label: snext.lab,
-		}, -1)
+			Cond:  cond,
+			Label: sbody.lab,
+		}, prev.unty)
 
-		scond.branchTo(sbody)
+		scond.branchTo(snext)
 	}
 
 	// body
@@ -755,6 +776,7 @@ func (c *Front) compileExpr(ctx context.Context, s *Scope, e ast.Expr, lvalue bo
 		}
 
 		var op any
+		typ := c.resolveType(ctx, s, l)
 
 		switch e.Op.String() {
 		case "+":
@@ -777,11 +799,13 @@ func (c *Front) compileExpr(ctx context.Context, s *Scope, e ast.Expr, lvalue bo
 				L: l,
 				R: r,
 			}
+
+			typ = s.cmpt
 		default:
 			panic(e.Op)
 		}
 
-		id = s.add(op, s.EType[l])
+		id = s.add(op, typ)
 	case *ast.IndexExpr:
 		var base ir.Expr
 
@@ -795,11 +819,14 @@ func (c *Front) compileExpr(ctx context.Context, s *Scope, e ast.Expr, lvalue bo
 			return 0, errors.Wrap(err, "index idx")
 		}
 
+		typ := s.EType[base]
+		typ = s.Exprs[typ].(tp.Array).Elem
+
 		id = s.add(ir.Offset{
 			Base:   base,
 			Offset: idx,
 			Size:   s.add(ir.Imm(8), s.unty),
-		}, s.EType[base])
+		}, s.unty)
 
 		if lvalue {
 			break
@@ -807,7 +834,7 @@ func (c *Front) compileExpr(ctx context.Context, s *Scope, e ast.Expr, lvalue bo
 
 		ss := s.findState(nil)
 
-		id = s.add(ir.Load{Ptr: id, State: ss}, -1)
+		id = s.add(ir.Load{Ptr: id, State: ss}, typ)
 	case *ast.CallExpr:
 		n := e.Fun.(*ast.Ident)
 
@@ -844,6 +871,33 @@ func (c *Front) compileExpr(ctx context.Context, s *Scope, e ast.Expr, lvalue bo
 	return
 }
 
+func (c *Front) ensureTyped(ctx context.Context, s *Scope, id ir.Expr) ir.Expr {
+	if s.EType[id] != s.unty {
+		return id
+	}
+
+	tp := c.resolveType(ctx, s, id)
+
+	return s.add(s.Exprs[id], tp)
+}
+
+func (c *Front) resolveType(ctx context.Context, s *Scope, id ir.Expr) ir.Type {
+	if typ := s.EType[id]; typ != s.unty {
+		return typ
+	}
+
+	e := s.Exprs[id]
+
+	switch e := e.(type) {
+	case ir.Imm:
+		return s.intt
+	case ir.Phi:
+		return c.resolveType(ctx, s, e[0])
+	default:
+		panic(e)
+	}
+}
+
 func (c *Front) compileTypeSpec(ctx context.Context, s *Scope, spec *ast.TypeSpec) (err error) {
 	id, err := c.compileType(ctx, s, spec.Type)
 	if err != nil {
@@ -866,7 +920,7 @@ func (c *Front) compileType(ctx context.Context, s *Scope, e ast.Expr) (id ir.Ty
 
 		switch e.Name {
 		case "int":
-			id = s.addType(tp.Int{Bits: 64, Signed: true}, -1)
+			id = s.addType(tp.Int{Bits: 64, Signed: true}, s.tdef)
 		default:
 			panic(e.Name)
 		}
@@ -883,7 +937,7 @@ func (c *Front) compileType(ctx context.Context, s *Scope, e ast.Expr) (id ir.Ty
 			return id, errors.Wrap(err, "arr len")
 		}
 
-		id = s.addType(tp.Array{Elem: id, Len: l}, -1)
+		id = s.addType(tp.Array{Elem: id, Len: l}, s.tdef)
 	case *ast.StarExpr:
 		id, err = c.compileType(ctx, s, e.X)
 		if err != nil {
@@ -891,7 +945,7 @@ func (c *Front) compileType(ctx context.Context, s *Scope, e ast.Expr) (id ir.Ty
 		}
 
 		x := tp.Ptr{X: s.Exprs[id].(tp.Type)}
-		id = s.addType(x, -1)
+		id = s.addType(x, s.tdef)
 	case *ast.StructType:
 		x := tp.Struct{}
 
@@ -918,7 +972,7 @@ func (c *Front) compileType(ctx context.Context, s *Scope, e ast.Expr) (id ir.Ty
 			}
 		}
 
-		id = s.addType(x, -1)
+		id = s.addType(x, s.tdef)
 	default:
 		panic(fmt.Sprintf("%T: %[1]v", e))
 	}
@@ -960,7 +1014,7 @@ func (s *Scope) nextScope(lab ir.Label, delta int, prev ...*Scope) *Scope {
 
 	if lab != -1 {
 		next.lab = lab
-		next.labid = s.alloc(lab, -1)
+		next.labid = s.alloc(lab, s.unty)
 	}
 
 	next.from = loc.Caller(1)
@@ -970,8 +1024,8 @@ func (s *Scope) nextScope(lab ir.Label, delta int, prev ...*Scope) *Scope {
 	return next
 }
 
-func (s *Scope) addphi(x any) ir.Expr {
-	id := s.pkgContext.alloc(x, -1)
+func (s *Scope) addphi(x any, tp ir.Type) ir.Expr {
+	id := s.pkgContext.alloc(x, tp)
 	s.phi = append(s.phi, id)
 
 	return id
@@ -987,15 +1041,6 @@ func (s *Scope) add(x any, tp ir.Type) ir.Expr {
 func (s *Scope) addType(x any, tp ir.Type) ir.Type {
 	return ir.Type(s.add(x, tp))
 }
-
-/*
-func (s *Scope) addTyped(x any, tp ir.Type) ir.Expr {
-	id := s.pkgContext.alloc(x, tp)
-	s.code = append(s.code, id)
-
-	return id
-}
-*/
 
 func (s *Scope) define(name string, id ir.Expr) {
 	_, ok := s.findDef(name, s.depth)
@@ -1077,7 +1122,7 @@ func (s *Scope) findValueMerge(def definition, visited visitSet) ir.Expr {
 		return phi[0]
 	}
 
-	id := s.addphi(phi)
+	id := s.addphi(phi, s.EType[phi[0]])
 	s.vars[def] = id
 
 	return id
@@ -1123,7 +1168,7 @@ func (s *Scope) findState(visited visitSet) (id ir.State) {
 
 func (s *Scope) findStateMerge(visited visitSet) ir.State {
 	phi := s.mergeStates(visited)
-	id := s.addphi(phi)
+	id := s.addphi(phi, s.unty)
 
 	s.state = ir.State(id)
 
@@ -1221,7 +1266,7 @@ func (s *Scope) branchTo(to *Scope) {
 		panic(to)
 	}
 
-	s.add(ir.B{Label: to.lab}, -1)
+	s.add(ir.B{Label: to.lab}, s.unty)
 	to.appendPrev(s)
 }
 
@@ -1284,10 +1329,6 @@ func (p *pkgContext) alloc(x any, tp ir.Type) ir.Expr {
 	p.EType = append(p.EType, tp)
 
 	return id
-}
-
-func (p *pkgContext) typeid() ir.Type {
-	return ir.Type(p.id())
 }
 
 //func (p *pkgContext) addType(x any) ir.Type {

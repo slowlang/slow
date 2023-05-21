@@ -5,7 +5,11 @@ import "github.com/slowlang/slow/src/compiler/ir"
 type (
 	Type = ir.Type
 
-	Basic struct{}
+	Basic   struct{}
+	Cmp     struct{}
+	TypeDef struct{}
+	State   struct{}
+	Untyped struct{}
 
 	Func struct {
 		In  []Type
@@ -16,8 +20,6 @@ type (
 		Bits   int16
 		Signed bool
 	}
-
-	Untyped struct{}
 
 	Ptr struct {
 		X Type
