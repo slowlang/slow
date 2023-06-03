@@ -13,6 +13,7 @@ type (
 	Cmp     struct{}
 	TypeDef struct{}
 	State   struct{}
+	Unit    struct{}
 	Untyped struct{}
 
 	Func struct {

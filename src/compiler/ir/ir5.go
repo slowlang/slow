@@ -12,8 +12,8 @@ type (
 	Label int
 	Cond  string
 
-	State  Expr
-	Effect Expr
+	//	State  Expr
+	//	Effect Expr
 
 	Phi []PhiBranch
 
@@ -39,12 +39,12 @@ type (
 		In  []Expr
 		Out []Expr
 
-		State struct {
-			In, Out State `tlog:",omitempty"`
-		}
-		Effect struct {
-			In, Out Effect `tlog:",omitempty"`
-		}
+		//	State struct {
+		//		In, Out State `tlog:",omitempty"`
+		//	}
+		//	Effect struct {
+		//		In, Out Effect `tlog:",omitempty"`
+		//	}
 
 		Code []Expr
 	}
@@ -54,8 +54,8 @@ type (
 
 		In []Expr
 
-		StateIn  State  `tlog:",omitempty"`
-		EffectIn Effect `tlog:",omitempty"`
+		//	StateIn  State  `tlog:",omitempty"`
+		//	EffectIn Effect `tlog:",omitempty"`
 	}
 
 	B struct {

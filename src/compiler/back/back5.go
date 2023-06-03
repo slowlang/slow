@@ -6,6 +6,7 @@ import (
 
 	"github.com/nikandfor/errors"
 	"github.com/nikandfor/tlog"
+	"github.com/slowlang/slow/src/compiler/bitmap"
 	"github.com/slowlang/slow/src/compiler/ir"
 )
 
@@ -25,11 +26,15 @@ type (
 	}
 
 	funContext struct {
+		//	e2i map[ir.Expr]int
 		//	e2b map[ir.Expr]int
 		//	l2e map[ir.Label]ir.Expr
+		//	l2i []int // ir.Label -> index
 		//	lin map[ir.Label][]ir.Expr
 
-		loop []int
+		loop  []int // index -> depth
+		slots map[ir.Expr]*bitmap.Big
+		edges map[ir.Expr]*bitmap.Big
 	}
 
 	Reg int
@@ -100,8 +105,14 @@ func (c *Compiler) compileFunc(ctx context.Context, b []byte, p *pkgContext, f *
 
 		return -1
 	}(), "name", f.Name, "in", f.In, "out", f.Out,
-		"state", f.State, "effect", f.Effect)
+	/*"state", f.State, "effect", f.Effect*/)
 	defer tr.Finish("err", &err)
+
+	if tr.If("hide_func_" + f.Name) {
+		tr.Printw("hide func logs")
+		tr.Logger = nil
+		ctx = tlog.ContextWithSpan(ctx, tr)
+	}
 
 	p.funContext = &funContext{}
 
@@ -115,15 +126,32 @@ func (c *Compiler) compileFunc(ctx context.Context, b []byte, p *pkgContext, f *
 		}
 	}
 
-	err = c.walkBlocks(ctx, p, f)
+	if tr.If("stop_after_dump") {
+		return b, nil
+	}
+
+	err = c.findLoops(ctx, p, f)
 	if err != nil {
 		return nil, errors.Wrap(err, "walk blocks")
+	}
+
+	if tr.If("stop_after_loops") {
+		return b, nil
+	}
+
+	err = c.calcGraph(ctx, p, f)
+	if err != nil {
+		return nil, errors.Wrap(err, "walk blocks")
+	}
+
+	if tr.If("stop_after_graph") {
+		return b, nil
 	}
 
 	return b, nil
 }
 
-func (c *Compiler) walkBlocks(ctx context.Context, p *pkgContext, f *ir.Func) (err error) {
+func (c *Compiler) findLoops(ctx context.Context, p *pkgContext, f *ir.Func) (err error) {
 	tr := tlog.SpanFromContext(ctx)
 
 	i2b := make([]int, len(f.Code))
@@ -136,6 +164,12 @@ func (c *Compiler) walkBlocks(ctx context.Context, p *pkgContext, f *ir.Func) (e
 
 	for i, id := range f.Code {
 		x := p.Exprs[id]
+
+		if bb == 0 {
+			switch x.(type) {
+			case ir.Args, ir.Out:
+			}
+		}
 
 		if l, ok := x.(ir.Label); ok || next {
 			bb++
@@ -208,9 +242,8 @@ func (c *Compiler) walkBlocks(ctx context.Context, p *pkgContext, f *ir.Func) (e
 			visit[path[j]] = 2
 		}
 
-		path = path[:start.l]
-
 		i := start.i
+		path = path[:start.l]
 
 		tr.Printw("restart", "i", i)
 
@@ -236,7 +269,6 @@ func (c *Compiler) walkBlocks(ctx context.Context, p *pkgContext, f *ir.Func) (e
 				i = l2i[x.Label]
 			case ir.BCond:
 				stack = append(stack, il{i: i + 1, l: len(path)})
-				//stack = append(stack, i+1)
 				i = l2i[x.Label]
 			default:
 				i++
@@ -282,7 +314,7 @@ func (c *Compiler) walkBlocks(ctx context.Context, p *pkgContext, f *ir.Func) (e
 			}
 		}
 
-		tr.Printw("loop", "nodes", visit)
+		tr.Printw("loop nodes", "nodes", visit)
 	}
 
 	if tr.If("dump_func_struct") {
@@ -291,13 +323,297 @@ func (c *Compiler) walkBlocks(ctx context.Context, p *pkgContext, f *ir.Func) (e
 		for i, id := range f.Code {
 			x := p.Exprs[id]
 
-			args := []interface{}{"bb", i2b[i], "loop", loop[i], "i", i, "id", id, "tp", p.EType[id], "typ", tlog.NextAsType, x, "val", x}
+			args := []interface{}{"i", i, "bb", i2b[i], "loop", loop[i], "id", id /*"tp", p.EType[id], */, "typ", tlog.NextAsType, x, "val", x}
 
 			if l, ok := x.(ir.Label); ok {
 				args = append(args, "l_in", lin[l])
 			}
 
 			tr.Printw("code", args...)
+		}
+	}
+
+	return nil
+}
+
+func (c *Compiler) calcGraph(ctx context.Context, p *pkgContext, f *ir.Func) (err error) {
+	tr := tlog.SpanFromContext(ctx)
+
+	p.slots = make(map[ir.Expr]*bitmap.Big, len(f.Code))
+	labelhave := make(map[ir.Label]*bitmap.Big)
+	labelneed := make(map[ir.Label]map[ir.Expr]*bitmap.Big) // B -> slots
+
+	for _, id := range f.Code {
+		switch x := p.Exprs[id].(type) {
+		case ir.Label:
+			labelhave[x] = bitmap.New()
+			labelneed[x] = make(map[ir.Expr]*bitmap.Big)
+		}
+	}
+
+	vals := bitmap.Make()
+
+	set := func(ids ...ir.Expr) {
+		for _, id := range ids {
+			vals.Set(int(id))
+		}
+	}
+
+	// forward pass
+
+	for pass := 0; pass < 2; pass++ {
+		vals.Reset()
+
+		for i, id := range f.Code {
+			x := p.Exprs[id]
+
+			set(id)
+
+			switch x := x.(type) {
+			case ir.Imm, ir.Args, ir.Out /*, ir.State, ir.Effect*/ :
+			case ir.Cmp, ir.Add, ir.Sub, ir.Mul, ir.Div, ir.Mod:
+				//	case ir.Ptr, ir.Load, ir.Offset:
+				//	case ir.Store:
+				//	case ir.Alloc:
+			case ir.Label:
+				vals.Clear(int(id))
+				vals.Or(*labelhave[x])
+
+				for j := i + 1; j < len(f.Code); j++ {
+					x, ok := p.Exprs[id].(ir.Phi)
+					if !ok {
+						break
+					}
+
+					for _, xx := range x {
+						vals.Clear(int(xx.Expr))
+					}
+				}
+
+				for j := i + 1; j < len(f.Code); j++ {
+					_, ok := p.Exprs[id].(ir.Phi)
+					if !ok {
+						break
+					}
+
+					set(id)
+				}
+			case ir.B:
+				vals.Clear(int(id))
+				labelhave[x.Label].Or(vals)
+			case ir.BCond:
+				vals.Clear(int(id))
+				labelhave[x.Label].Or(vals)
+			case ir.Phi:
+			//	for _, xx := range x {
+			//		vals.Clear(int(xx.Expr))
+			//	}
+
+			//	set(id)
+			case ir.Call:
+				// TODO
+				//	case tp.Array, tp.Int:
+			default:
+				panic(x)
+			}
+
+			if pass != 0 {
+				p.slots[id] = vals.CopyPtr()
+			}
+
+			switch x.(type) {
+			case ir.B:
+				vals.Reset()
+			}
+		}
+	}
+
+	// backward pass
+
+	for _, vals := range labelhave {
+		vals.Reset()
+	}
+
+	var phis map[ir.Expr]*bitmap.Big
+
+	for pass := 0; pass < 2; pass++ {
+		vals.Reset()
+
+		for i := len(f.Code) - 1; i >= 0; i-- {
+			id := f.Code[i]
+			x := p.Exprs[id]
+
+			tr := tr.V("backward_pass")
+			tr.Printw("backward pass", "pass", pass, "i", i, "id", id, "typ", tlog.NextAsType, x, "vals", vals, "phis", phis)
+
+			switch x := x.(type) {
+			case ir.B:
+				vals.Reset()
+
+				tr.Printw("backward pass", "labelhave", labelhave[x.Label], "labelneed", labelneed[x.Label])
+				tr.Printw("reset from label", "label", x.Label, "b", id, "vals", labelneed[x.Label][id])
+
+				vals.Or(*labelhave[x.Label])
+
+				if vv, ok := labelneed[x.Label][id]; ok {
+					vals.Or(*vv)
+				}
+			case ir.BCond:
+				tr.Printw("backward pass", "labelhave", labelhave[x.Label], "labelneed", labelneed[x.Label])
+				tr.Printw("add from label", "label", x.Label, "b", id, "vals", labelneed[x.Label][id])
+
+				vals.Or(*labelhave[x.Label])
+
+				if vv, ok := labelneed[x.Label][id]; ok {
+					vals.Or(*vv)
+				}
+			}
+
+			if pass != 0 {
+				switch x.(type) {
+				case ir.Label, ir.Phi:
+				default:
+					p.slots[id].And(vals)
+				}
+			}
+
+			vals.Clear(int(id))
+
+			switch x := x.(type) {
+			case ir.Imm, ir.Args, ir.Out /*, ir.State, ir.Effect*/ :
+			case ir.Cmp:
+				set(x.L, x.R)
+			case ir.Add:
+				set(x.L, x.R)
+			case ir.Sub:
+				set(x.L, x.R)
+			case ir.Mul:
+				set(x.L, x.R)
+			case ir.Div:
+				set(x.L, x.R)
+			case ir.Mod:
+				set(x.L, x.R)
+				//	case ir.Ptr, ir.Load, ir.Offset:
+				//	case ir.Store:
+				//	case ir.Alloc:
+			case ir.Label:
+				labelhave[x].Reset()
+				labelhave[x].Or(vals)
+
+				labelneed[x] = phis
+				phis = nil
+			case ir.B:
+			case ir.BCond:
+				set(x.Expr)
+			case ir.Phi:
+				if phis == nil {
+					phis = make(map[ir.Expr]*bitmap.Big)
+				}
+
+				for _, xx := range x {
+					//	set(xx.Expr)
+					if _, ok := phis[xx.B]; !ok {
+						phis[xx.B] = bitmap.New()
+					}
+
+					phis[xx.B].Set(int(xx.Expr))
+				}
+			case ir.Call:
+				set(x.In...)
+			//	vals.Set(int(x.StateIn))
+			//	vals.Set(int(x.EffectIn))
+			//	case tp.Array, tp.Int:
+			default:
+				panic(x)
+			}
+		}
+	}
+
+	// phi run
+
+	for i, id := range f.Code {
+		x := p.Exprs[id]
+
+		_, ok := x.(ir.Label)
+		if !ok {
+			continue
+		}
+
+		vals.Reset()
+
+		j := i + 1
+		for ; j < len(f.Code); j++ {
+			jid := f.Code[j]
+			x := p.Exprs[jid]
+
+			_, ok := x.(ir.Phi)
+			if !ok {
+				break
+			}
+
+			set(jid)
+		}
+
+		for k := i; k < j; k++ {
+			p.slots[f.Code[k]].Reset()
+			p.slots[f.Code[k]].Or(vals)
+		}
+	}
+
+	if tr.If("dump_func_slots") {
+		tr.Printw("func slots")
+
+		for i, id := range f.Code {
+			x := p.Exprs[id]
+
+			tr.Printw("code", "loop", p.loop[i], "id", id, "tp", p.EType[id], "typ", tlog.NextAsType, x, "val", x, "slots", p.slots[id])
+		}
+	}
+
+	p.edges = make(map[ir.Expr]*bitmap.Big)
+	clique := 0
+
+	for _, id := range f.Code {
+		x := p.Exprs[id]
+
+		switch x.(type) {
+		case ir.Label, ir.B, ir.BCond:
+			continue
+		}
+
+		if c := p.slots[id].Size(); c > clique {
+			clique = c
+		}
+
+		p.edges[id] = bitmap.New()
+
+		p.slots[id].Range(func(xi int) bool {
+			x := ir.Expr(xi)
+
+			if x == id {
+				return true
+			}
+
+			if _, ok := p.edges[x]; !ok {
+				p.edges[x] = bitmap.New()
+			}
+
+			p.edges[id].Set(xi)
+			p.edges[x].Set(int(id))
+
+			return true
+		})
+	}
+
+	if tr.If("dump_func_graph") {
+		tr.Printw("graph", "clique", clique)
+
+		for _, id := range f.Code {
+			if p.edges[id].Size() == 0 {
+				continue
+			}
+
+			tr.Printw("edges", "id", id, "x", p.edges[id])
 		}
 	}
 

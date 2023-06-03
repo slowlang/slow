@@ -22,6 +22,7 @@ type (
 		untyped ir.Type
 		typeDef ir.Type
 
+		unit ir.Type
 		cmpt ir.Type
 
 		zero ir.Expr
@@ -36,8 +37,7 @@ type (
 
 		root *Scope
 
-		nextdef   definition
-		nextlabel ir.Label
+		nextdef definition
 
 		queue map[string]any
 	}
@@ -46,6 +46,8 @@ type (
 		*ir.Func
 
 		exit *Scope
+
+		nextlabel ir.Label
 	}
 
 	Scope struct {
@@ -68,9 +70,9 @@ type (
 
 		retids []ir.Expr
 
-		valuef  func(definition, visitSet) ir.Expr
-		statef  func(visitSet) ir.State
-		effectf func(visitSet) ir.Effect
+		valuef func(definition, visitSet) ir.Expr
+		//	statef  func(visitSet) ir.State
+		//	effectf func(visitSet) ir.Effect
 
 		from loc.PC
 	}
@@ -103,7 +105,11 @@ func (c *Front) Compile(ctx context.Context) (_ *ir.Package, err error) {
 	p.untyped = ir.Type(p.alloc(tp.Untyped{}, 0))
 	p.typeDef = ir.Type(p.alloc(tp.TypeDef{}, p.untyped))
 
+	p.zero = p.alloc(tp.Unit{}, p.untyped)
+
+	p.unit = p.addType(tp.Unit{})
 	p.cmpt = p.addType(tp.Cmp{})
+
 	p.Int = p.addType(tp.Int{Signed: true})
 
 	s := rootScope(p, nil)
@@ -262,6 +268,10 @@ func (c *Front) compileFunc(ctx context.Context, par *Scope, d *ast.FuncDecl) (f
 		var phi ir.Phi
 
 		for _, p := range s.exit.prev {
+			if p.retids == nil { // TODO
+				continue
+			}
+
 			b := p.finalBranch()
 
 			phi = append(phi, ir.PhiBranch{
@@ -748,7 +758,7 @@ func (c *Front) compileExpr(ctx context.Context, s *Scope, e ast.Expr) (id ir.Ex
 		ftp := s.EType[f]
 		ftyp := s.Exprs[ftp].(*tp.Func)
 
-		id = s.add(x, -1)
+		id = s.add(x, s.unit)
 
 		for i, tp := range ftyp.Out {
 			if i == 0 {
@@ -1107,6 +1117,13 @@ func (s *Scope) walk(f func(*Scope), stop ...*Scope) {
 	walk(s)
 }
 
+func (s *Scope) label() ir.Label {
+	l := s.nextlabel
+	s.nextlabel++
+
+	return l
+}
+
 func (p *pkgContext) id() ir.Expr {
 	return ir.Expr(len(p.Exprs))
 }
@@ -1121,12 +1138,6 @@ func (p *pkgContext) alloc(x any, tp ir.Type) ir.Expr {
 	p.EType = append(p.EType, tp)
 
 	return id
-}
-
-func (p *pkgContext) label() ir.Label {
-	l := p.nextlabel
-	p.nextlabel++
-	return l
 }
 
 func (v visitSet) Mark(s *Scope) {

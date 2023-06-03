@@ -119,7 +119,11 @@ func (s Big) CopyPtr() *Big {
 	return r
 }
 
-func (s Big) Size() (r int) {
+func (s *Big) Size() (r int) {
+	if s == nil {
+		return 0
+	}
+
 	for _, c := range s.b {
 		r += bits.OnesCount64(c)
 	}
@@ -166,8 +170,12 @@ func (s Big) First() int {
 	return -1
 }
 
-func (s Big) TlogAppend(b []byte) []byte {
+func (s *Big) TlogAppend(b []byte) []byte {
 	var e tlwire.LowEncoder
+
+	if s == nil {
+		return e.AppendNil(b)
+	}
 
 	b = e.AppendTag(b, tlwire.Array, -1)
 
