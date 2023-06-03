@@ -1,0 +1,23 @@
+package main
+
+type Obj struct {
+	Val int
+}
+
+func main(argc int) int {
+	o := New()
+
+	Up(o, argc)
+
+	return o.Val
+}
+
+func New() *Obj {
+	return &Obj{
+		Val: 1,
+	}
+}
+
+func Up(o *Obj, x int) {
+	o.Val = x
+}

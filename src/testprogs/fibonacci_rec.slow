@@ -4,7 +4,7 @@ func main(a int) (r int) {
 	return fib(a)
 }
 
-func fib(n int) (r int) {
+func fib(n int) int {
 	if n <= 1 {
 		return n
 	}

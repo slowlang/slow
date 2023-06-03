@@ -37,22 +37,14 @@ func Compile(ctx context.Context, name string, text []byte) (obj []byte, err err
 
 	p, err := f.Compile(ctx)
 	if err != nil {
-		return nil, errors.Wrap(err, "analyze")
+		return nil, errors.Wrap(err, "front")
 	}
-
-	//	for _, f := range p.Funcs {
-	//		tlog.Printw("func", "name", f.Name, "in", f.In, "out", f.Out)
-	//
-	//		for id, e := range f.Code {
-	//			tlog.Printw("expr", "id", id, "type", tlog.FormatNext("%T"), e, "val", e)
-	//		}
-	//	}
 
 	b := back.New()
 
 	obj, err = b.CompilePackage(ctx, nil, nil, p)
 	if err != nil {
-		return nil, errors.Wrap(err, "compile")
+		return nil, errors.Wrap(err, "back")
 	}
 
 	return obj, nil

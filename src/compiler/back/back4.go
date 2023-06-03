@@ -1,3 +1,5 @@
+//go:build ignore
+
 package back
 
 import (
@@ -470,11 +472,11 @@ func (c *Compiler) buildGraph(ctx context.Context, p *pkgContext, f *ir.Func) (e
 			case ir.Load:
 				dset(x.Ptr)
 			case ir.Offset:
-				dset(x.Base, x.Offset /*, x.Size*/)
+				dset(x.Base, x.Offset, x.Size)
 			case ir.Store:
 				dset(x.Ptr, x.Val)
 			case ir.Alloc:
-			//	dset(x.Type)
+				dset(ir.Expr(x.Type))
 			case tp.Int:
 			case tp.Array:
 				dset(ir.Expr(x.Elem), x.Len)
@@ -1112,7 +1114,9 @@ _%[1]v:
 				b = fmt.Appendf(b, "	MOV	X%d, X%d	// func arg %d\n", i, reg(id), i)
 			}
 
-			b = fmt.Appendf(b, "	BL	_%v	// func call  ", x.Func)
+			f := p.Exprs[x.Func].(*ir.Func)
+
+			b = fmt.Appendf(b, "	BL	_%v	// func call  ", f.Name)
 
 			for i, id := range x.Args {
 				if i != 0 {

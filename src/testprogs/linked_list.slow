@@ -1,0 +1,64 @@
+package main
+
+type Node {
+	Val int
+	Next *Node
+}
+
+func main(arg int) {
+	ll := makeLL(arg)
+
+	for q := ll; q != nil; q = q.Next {
+		print(q.Val, " -> ")
+	}
+
+	println()
+}
+
+func makeLL(n int) *Node {
+	var head *Node
+	l := &head
+
+	for i := 0; i < n; i++ {
+		*l = &Node{
+			Val: i + 1,
+		}
+
+		l = &(*l).Next
+	}
+
+	return head
+}
+
+/*
+
+makeLL:
+	STP     FP, LR, [SP, #-16]!
+	STP		X19, X20, [SP, #-16]!
+	STP		X21, X22, [SP, #-16]!
+	MOV     FP, SP
+
+	MOV		X20, X0
+	MOV		X19, XZR
+	B		cond
+
+loop:
+	MOV 	X0, 16
+	BL		malloc
+
+	ADD 	X19, X19, 1
+	STR		X19, [X0, 0]
+
+	STR 	X0, [X21]
+	MOV		X21, [X0, 8]
+
+cond:
+	CMP		X19, X20
+	BLT		loop
+
+
+	LDP     X21, X22, [SP], #16
+	LDP     X19, X20, [SP], #16
+	LDP     FP, LR, [SP], #16
+	RET
+*/

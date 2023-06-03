@@ -1,0 +1,16 @@
+package main
+
+func main(a int) (r int) {
+	return fib(a)
+}
+
+func fib(n int) int {
+	x0, x1 := 1, 1
+
+	for n > 1 {
+		n = n - 1
+		x0, x1 = x1, x0 + x1
+	}
+
+	return x1
+}

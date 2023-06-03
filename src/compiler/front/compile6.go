@@ -1,3 +1,5 @@
+//go:build ignore
+
 package front
 
 import (
@@ -96,7 +98,7 @@ func (c *Front) Compile(ctx context.Context) (_ *ir.Package, err error) {
 	p.stat = s.addType(tp.State{}, p.unty)
 	p.cmpt = s.addType(tp.Cmp{}, p.unty)
 	p.tdef = s.addType(tp.TypeDef{}, p.unty)
-	p.intt = s.addType(tp.Int{Signed: true}, p.unty)
+	p.intt = s.addType(tp.Int{Bits: 0, Signed: true}, p.unty)
 	p.zero = s.alloc(ir.Zero{}, p.unty)
 	//	p.self = s.alloc(p.Package, p.unty)
 
@@ -110,12 +112,12 @@ func (c *Front) Compile(ctx context.Context) (_ *ir.Package, err error) {
 	}
 
 	for name, d := range p.tasks {
+		delete(p.tasks, name)
+
 		err = c.compileTask(ctx, s, d)
 		if err != nil {
 			return nil, errors.Wrap(err, "decl %T", d)
 		}
-
-		delete(p.tasks, name)
 	}
 
 	return p.Package, nil
@@ -154,6 +156,8 @@ func (c *Front) findFunc(ctx context.Context, s *Scope, name string) (ir.Expr, *
 	for _, id := range s.pkgContext.Funcs {
 		f := s.pkgContext.Exprs[id].(*ir.Func)
 
+		tlog.Printw("find func of", "find", name, "of", f)
+
 		if f.Name == name {
 			return id, f
 		}
@@ -169,6 +173,8 @@ func (c *Front) findFunc(ctx context.Context, s *Scope, name string) (ir.Expr, *
 		panic(name)
 	}
 
+	delete(s.tasks, name)
+
 	id, err := c.compileFunc(ctx, s.root, fd)
 	if err != nil {
 		panic(err.Error())
@@ -180,6 +186,8 @@ func (c *Front) findFunc(ctx context.Context, s *Scope, name string) (ir.Expr, *
 }
 
 func (c *Front) compileTask(ctx context.Context, s *Scope, d any) (err error) {
+	tlog.Printw("compile task", "typ", tlog.NextIsType, d, "d", d)
+
 	switch d := d.(type) {
 	case *ast.FuncDecl:
 		_, err = c.compileFunc(ctx, s, d)
@@ -263,7 +271,7 @@ func (c *Front) compileFunc(ctx context.Context, par *Scope, fn *ast.FuncDecl) (
 	s.Exprs[ftp] = tp
 	s.Exprs[fid] = f
 
-	tlog.Printw("compile func", "name", f.Name, "expr", fid, "typ", ftp)
+	tlog.Printw("compile func", "name", f.Name, "expr", fid, "typ", ftp, "from", loc.Callers(1, 4))
 
 	s.exit = s.nextScope(s.label(), 0)
 
@@ -377,20 +385,44 @@ func (c *Front) compileStmt(ctx context.Context, s *Scope, x ast.Stmt) (_ *Scope
 			}
 		}
 
+		tlog.Printw("return", "func", s.funContext.Name, "ids", ids)
+
 		s.ret(ids)
 
 		return s, nil
 	case *ast.AssignStmt:
-		if len(x.Lhs) != len(x.Rhs) {
-			panic("bad assign")
-		}
+		ids := make([]ir.Expr, len(x.Lhs))
 
-		ids := make([]ir.Expr, len(x.Rhs))
+		tlog.Printw("assignment is func?", "e_typ", tlog.NextIsType, x.Rhs[0], "rhs_len", len(x.Rhs))
 
-		for i, e := range x.Rhs {
-			ids[i], err = c.compileExpr(ctx, s, e, false)
+		if _, ok := x.Rhs[0].(*ast.CallExpr); ok && len(x.Rhs) == 1 {
+			id, err := c.compileExpr(ctx, s, x.Rhs[0], false)
 			if err != nil {
 				return nil, errors.Wrap(err, "assignment rhs")
+			}
+
+			call := s.Exprs[id].(ir.Call)
+			ftp := s.EType[call.Func]
+			ftyp := s.Exprs[ftp].(*tp.Func)
+
+			if len(ids) != len(ftyp.Out) {
+				panic("bad assign")
+			}
+
+			for i := range ftyp.Out {
+				ids[i] = id + ir.Expr(i)
+				tlog.Printw("func out", "i", i, "id", ids[i], "tp", s.EType[ids[i]], "fid", id)
+			}
+		} else {
+			if len(ids) != len(x.Rhs) {
+				panic("bad assign")
+			}
+
+			for i, e := range x.Rhs {
+				ids[i], err = c.compileExpr(ctx, s, e, false)
+				if err != nil {
+					return nil, errors.Wrap(err, "assignment rhs")
+				}
 			}
 		}
 
@@ -719,6 +751,10 @@ func (c *Front) compileCond(ctx context.Context, s *Scope, e ast.Expr) (cc ir.Co
 }
 
 func (c *Front) compileExpr(ctx context.Context, s *Scope, e ast.Expr, lvalue bool) (id ir.Expr, err error) {
+	//	defer func() {
+	//		tlog.Printw("compile expr", "e", e, "lval", lvalue, "id", id, "err", err, "from", loc.Caller(1))
+	//	}()
+
 	switch e := e.(type) {
 	case *ast.Ident:
 		id = s.value(e.Name)
@@ -822,10 +858,59 @@ func (c *Front) compileExpr(ctx context.Context, s *Scope, e ast.Expr, lvalue bo
 		typ := s.EType[base]
 		typ = s.Exprs[typ].(tp.Array).Elem
 
+		size := s.Exprs[typ].(tp.Definition).MemSize()
+
 		id = s.add(ir.Offset{
 			Base:   base,
 			Offset: idx,
-			Size:   s.add(ir.Imm(8), s.unty),
+			Size:   s.add(ir.Imm(size), s.unty),
+		}, s.unty)
+
+		if lvalue {
+			break
+		}
+
+		ss := s.findState(nil)
+
+		id = s.add(ir.Load{Ptr: id, State: ss}, typ)
+	case *ast.SelectorExpr:
+		base, err := c.compileExpr(ctx, s, e.X, true)
+		if err != nil {
+			return 0, errors.Wrap(err, "selector base")
+		}
+
+		typ := s.EType[base]
+
+		tlog.Printw("selector", "e", e, "e_pos", e.Pos(), "base", base, "tp", typ, "typ", tlog.NextIsType, s.Exprs[base], "expr", s.Exprs[base])
+
+		if ptr, ok := s.Exprs[typ].(tp.Ptr); ok {
+			typ = ptr.X
+		} else {
+			panic(s.Exprs[typ])
+		}
+
+		var field tp.StructField
+
+		switch td := s.Exprs[typ].(type) {
+		case tp.Struct:
+			for _, f := range td.Fields {
+				if f.Name == e.Sel.Name {
+					field = f
+					break
+				}
+			}
+		default:
+			panic(td)
+		}
+
+		if field.Name == "" {
+			panic(e)
+		}
+
+		id = s.add(ir.Offset{
+			Base:   base,
+			Offset: s.add(ir.Imm(field.Offset), s.unty),
+			Size:   s.add(ir.Imm(1), s.unty),
 		}, s.unty)
 
 		if lvalue {
@@ -856,6 +941,14 @@ func (c *Front) compileExpr(ctx context.Context, s *Scope, e ast.Expr, lvalue bo
 
 		for i := 1; i < len(fdef.Out); i++ {
 			s.add(ir.Out(i), -1)
+		}
+
+		ftp := s.EType[fid]
+		ftyp := s.Exprs[ftp].(*tp.Func)
+
+		for i := range fdef.Out {
+			tlog.Printw("set func out", "func", n.Name, "i", i, "tp", ftyp.Out[i])
+			s.EType[id+ir.Expr(i)] = ftyp.Out[i]
 		}
 	case *ast.CompositeLit:
 		tp, err := c.compileType(ctx, s, e.Type)
@@ -920,9 +1013,21 @@ func (c *Front) compileType(ctx context.Context, s *Scope, e ast.Expr) (id ir.Ty
 
 		switch e.Name {
 		case "int":
-			id = s.addType(tp.Int{Bits: 64, Signed: true}, s.tdef)
+			id = s.addType(tp.Int{Bits: 0, Signed: true}, s.tdef)
 		default:
-			panic(e.Name)
+			t, ok := s.tasks[e.Name]
+			if !ok {
+				panic(e.Name)
+			}
+
+			delete(s.tasks, e.Name)
+
+			err = c.compileTask(ctx, s.root, t)
+			if err != nil {
+				return -1, err
+			}
+
+			return s.types[e.Name], nil
 		}
 
 		s.types[e.Name] = id
@@ -944,7 +1049,7 @@ func (c *Front) compileType(ctx context.Context, s *Scope, e ast.Expr) (id ir.Ty
 			return id, errors.Wrap(err, "")
 		}
 
-		x := tp.Ptr{X: s.Exprs[id].(tp.Type)}
+		x := tp.Ptr{X: id}
 		id = s.addType(x, s.tdef)
 	case *ast.StructType:
 		x := tp.Struct{}
@@ -959,7 +1064,7 @@ func (c *Front) compileType(ctx context.Context, s *Scope, e ast.Expr) (id ir.Ty
 				x.Fields = append(x.Fields, tp.StructField{
 					Name:   "",
 					Offset: 0,
-					Type:   s.Exprs[ft].(tp.Type),
+					Type:   ft,
 				})
 			}
 
@@ -967,7 +1072,7 @@ func (c *Front) compileType(ctx context.Context, s *Scope, e ast.Expr) (id ir.Ty
 				x.Fields = append(x.Fields, tp.StructField{
 					Name:   n.Name,
 					Offset: 0,
-					Type:   s.Exprs[ft].(tp.Type),
+					Type:   ft,
 				})
 			}
 		}

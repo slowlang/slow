@@ -1,3 +1,5 @@
+//go:build ignore
+
 package ir
 
 type (
@@ -6,7 +8,7 @@ type (
 
 	Args int
 	Cond string
-	//	Data  string
+	//	Data  []byte
 	Imm   int64
 	Label int
 	Out   Expr
@@ -14,7 +16,7 @@ type (
 
 	State Expr
 
-	ABI int
+	ABI struct{}
 
 	Package struct {
 		Path string
