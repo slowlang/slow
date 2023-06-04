@@ -3,6 +3,7 @@ module github.com/slowlang/slow/src
 go 1.18
 
 require (
+	github.com/nikandfor/assert v0.0.0-20221129185021-704c04a067ef
 	github.com/nikandfor/cli v0.0.0-20230428202915-fdf5f3ba6b67
 	github.com/nikandfor/errors v0.8.0
 	github.com/nikandfor/loc v0.5.0

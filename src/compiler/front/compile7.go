@@ -27,7 +27,8 @@ type (
 
 		zero ir.Expr
 
-		Int ir.Type
+		Bool ir.Type
+		Int  ir.Type
 	}
 
 	pkgContext struct {
@@ -110,6 +111,7 @@ func (c *Front) Compile(ctx context.Context) (_ *ir.Package, err error) {
 	p.unit = p.addType(tp.Unit{})
 	p.cmpt = p.addType(tp.Cmp{})
 
+	p.Bool = p.addType(tp.Bool{})
 	p.Int = p.addType(tp.Int{Signed: true})
 
 	s := rootScope(p, nil)
@@ -725,6 +727,40 @@ func (c *Front) compileExpr(ctx context.Context, s *Scope, e ast.Expr) (id ir.Ex
 				L: l,
 				R: r,
 			}
+		case "/":
+			op = ir.Div{
+				L: l,
+				R: r,
+			}
+		case "%":
+			op = ir.Mod{
+				L: l,
+				R: r,
+			}
+		case "&":
+			op = ir.BitAnd{
+				L: l,
+				R: r,
+			}
+		case "|":
+			op = ir.BitOr{
+				L: l,
+				R: r,
+			}
+		case "&&":
+			op = ir.LogicAnd{
+				L: l,
+				R: r,
+			}
+
+			typ = s.Bool
+		case "||":
+			op = ir.LogicOr{
+				L: l,
+				R: r,
+			}
+
+			typ = s.Bool
 		case "<", ">", "<=", ">=", "==", "!=":
 			op = ir.Cmp{
 				L: l,

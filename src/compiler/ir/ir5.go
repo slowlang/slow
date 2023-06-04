@@ -91,6 +91,30 @@ type (
 	Cmp struct {
 		L, R Expr
 	}
+
+	LogicAnd struct {
+		L, R Expr
+	}
+
+	LogicOr struct {
+		L, R Expr
+	}
+
+	BitAnd struct {
+		L, R Expr
+	}
+
+	BitOr struct {
+		L, R Expr
+	}
+
+	LShift struct {
+		L, R Expr
+	}
+
+	RShift struct {
+		L, R Expr
+	}
 )
 
 const (

@@ -38,6 +38,22 @@ type (
 	}
 
 	Reg int
+
+	Job struct {
+		i, p int
+	}
+
+	Jobs []Job
+
+	walked int8
+)
+
+const (
+	walkNone = iota
+	walkLoop
+	walkMerge
+
+	walkEnd = -1
 )
 
 func New() *Compiler {
@@ -119,33 +135,32 @@ func (c *Compiler) compileFunc(ctx context.Context, b []byte, p *pkgContext, f *
 	if tr.If("dump_func_before") {
 		tr.Printw("func before")
 
-		for _, id := range f.Code {
+		for i, id := range f.Code {
 			x := p.Exprs[id]
 
-			tr.Printw("code", "id", id, "tp", p.EType[id], "typ", tlog.NextAsType, x, "val", x)
+			tr.Printw("code", "i", i, "id", id, "tp", p.EType[id], "typ", tlog.NextAsType, x, "val", x)
 		}
 	}
 
-	if tr.If("stop_after_dump") {
-		return b, nil
+	if tr.If("walkFunc") {
+		err = c.walkFunc(ctx, p, f)
+		if err != nil {
+			return nil, errors.Wrap(err, "walk func")
+		}
 	}
 
-	err = c.findLoops(ctx, p, f)
-	if err != nil {
-		return nil, errors.Wrap(err, "walk blocks")
+	if tr.If("findLoops") {
+		err = c.findLoops(ctx, p, f)
+		if err != nil {
+			return nil, errors.Wrap(err, "walk blocks")
+		}
 	}
 
-	if tr.If("stop_after_loops") {
-		return b, nil
-	}
-
-	err = c.calcGraph(ctx, p, f)
-	if err != nil {
-		return nil, errors.Wrap(err, "walk blocks")
-	}
-
-	if tr.If("stop_after_graph") {
-		return b, nil
+	if tr.If("calcGraph") {
+		err = c.calcGraph(ctx, p, f)
+		if err != nil {
+			return nil, errors.Wrap(err, "walk blocks")
+		}
 	}
 
 	return b, nil
@@ -154,11 +169,303 @@ func (c *Compiler) compileFunc(ctx context.Context, b []byte, p *pkgContext, f *
 func (c *Compiler) walkFunc(ctx context.Context, p *pkgContext, f *ir.Func) (err error) {
 	tr := tlog.SpanFromContext(ctx)
 
-	visit := set.MakeBitmap(len(f.Code))
+	l2i := make([]int, 0, 8)
+	lin := make([][]int, 0, 8)
 
-	for {
-		_, _ = tr, visit
+	setLabel := func(l ir.Label, i int) {
+		for len(l2i) <= int(l) {
+			l2i = append(l2i, -1)
+		}
+
+		l2i[l] = i
 	}
+
+	setLabelIn := func(l ir.Label, i int) {
+		for len(lin) <= int(l) {
+			lin = append(lin, nil)
+		}
+
+		lin[l] = append(lin[l], i)
+	}
+
+	for i, id := range f.Code {
+		x := p.Exprs[id]
+
+		switch x := x.(type) {
+		case ir.Label:
+			setLabel(x, i)
+		case ir.B:
+			setLabelIn(x.Label, i)
+		case ir.BCond:
+			setLabelIn(x.Label, i)
+		}
+	}
+
+	next := make([][]int, len(f.Code)+1)
+	prev := make([][]int, len(f.Code)+1)
+
+	link := func(i, j int) {
+		next[i] = append(next[i], j)
+		prev[j] = append(prev[j], i)
+	}
+
+	for i, id := range f.Code {
+		x := p.Exprs[id]
+
+		switch x := x.(type) {
+		case ir.B:
+			link(i, l2i[x.Label])
+		case ir.BCond:
+			link(i, i+1)
+			link(i, l2i[x.Label])
+		default:
+			link(i, i+1)
+		}
+	}
+
+	//
+
+	findLoop := func(h, i int) set.Bitmap {
+		res := set.MakeBitmap(0)
+
+		res.Set(h)
+		res.Set(i)
+
+		q := []int{i}
+
+		for j := 0; j < len(q); j++ {
+			for _, p := range prev[q[j]] {
+				if res.IsSet(p) {
+					continue
+				}
+
+				res.Set(p)
+				q = append(q, p)
+			}
+		}
+
+		return res
+	}
+
+	reachableFrom := make([]set.Bitmap, len(f.Code)+1)
+	pathSet := set.MakeBitmap(0)
+
+	visit := make([]walked, len(f.Code)+1)
+	visit[len(f.Code)] = walkEnd
+
+	path := make([]int, 0, len(f.Code))
+	jobs := Jobs{{i: 0}}
+
+	commonOrigin := func(x set.Bitmap) int {
+		for j := len(path) - 1; j >= 0; j-- {
+			i := path[j]
+
+			if !x.IsSet(i) {
+				continue
+			}
+
+			return i
+		}
+
+		return -1
+	}
+
+	findSwitch := func(m int) int {
+		tr := tr.V("find_switch")
+
+		x := set.MakeBitmap(0)
+
+		tr.Printw("find switch", "merge", m)
+
+		for _, p := range prev[m] {
+			q := reachableFrom[p]
+			tr.Printw("prev", "prev", p, "parents", q)
+			if q.Size() == 0 {
+				continue
+			}
+
+			if x.Size() == 0 {
+				x.Or(q)
+			} else {
+				x.And(q)
+			}
+		}
+
+		tr.Printw("common parents", "common", x)
+
+		return commonOrigin(x)
+	}
+
+	findSwitch2 := func(m int) map[int]int {
+		r := map[int]int{}
+
+		for _, p1 := range prev[m] {
+			for _, p2 := range prev[m] {
+				if p1 >= p2 {
+					continue
+				}
+
+				x := reachableFrom[p1].AndCopy(reachableFrom[p2])
+
+				o := commonOrigin(x)
+
+				tr.Printw("find switch 2", "m", m, "p1", p1, "p2", p2, "o", o)
+
+				r[o]++
+			}
+		}
+
+		return r
+	}
+
+	loops := map[[2]int]set.Bitmap{}
+	merges := map[int]map[int]int{}
+
+	findSwitch3 := func(m, p int) {
+		for _, p1 := range prev[m] {
+			if p == p1 {
+				continue
+			}
+
+			x := reachableFrom[p1]
+
+			if x.Size() == 0 {
+				continue
+			}
+
+			x = x.AndCopy(reachableFrom[p])
+			o := commonOrigin(x)
+
+			tr.Printw("find switch 3", "m", m, "p", p, "p1", p1, "o", o)
+
+			if merges[m] == nil {
+				merges[m] = map[int]int{}
+			}
+
+			merges[m][o]++
+		}
+	}
+
+	for len(jobs) != 0 {
+		job := jobs.Pop()
+		i := job.i
+
+		for j := job.p; j < len(path); j++ {
+			visit[path[j]] = walkMerge
+			pathSet.Clear(path[j])
+		}
+
+		path = path[:job.p]
+
+		for i < len(f.Code) {
+			if visit[i] != walkNone {
+				break
+			}
+
+			visit[i] = walkLoop
+			path = append(path, i)
+
+			reachableFrom[i].Or(pathSet)
+			pathSet.Set(i)
+
+			for _, j := range next[i][1:] {
+				jobs.Push(Job{i: j, p: len(path)})
+			}
+
+			i = next[i][0]
+		}
+
+		{
+			lab := ir.Label(-1)
+			if i < len(f.Code) {
+				lab = p.Exprs[f.Code[i]].(ir.Label)
+			}
+
+			var phis []ir.Expr
+			philen := 0
+
+			for j := i + 1; j < len(f.Code); j++ {
+				id := f.Code[j]
+				x := p.Exprs[id]
+
+				phi, ok := x.(ir.Phi)
+				if !ok {
+					break
+				}
+
+				phis = append(phis, id)
+
+				if philen != 0 && philen != len(phi) {
+					panic(id)
+				}
+
+				philen = len(phi)
+			}
+
+			tr.Printw("path walked", "st", job.i, "end", i, "visit", visit[i], "label", lab, "ins", philen, "phis", phis)
+			tr.Printw("path walked", "prefix", path[:job.p], "path", path[job.p:])
+		}
+
+		switch visit[i] {
+		case walkEnd:
+		case walkLoop:
+			id := [2]int{i, path[len(path)-1]}
+			loops[id] = findLoop(id[0], id[1])
+		case walkMerge:
+			findSwitch3(i, path[len(path)-1])
+
+			break
+
+			merges[i] = findSwitch2(i)
+			break
+
+			o := findSwitch(i)
+
+			if merges[i] == nil {
+				merges[i] = map[int]int{}
+			}
+
+			merges[i][o]++
+		default:
+			panic(visit[i])
+		}
+	}
+
+	p.loop = make([]int, len(f.Code))
+
+	tr.Printw("func structure")
+
+	for i, id := range f.Code {
+		x := p.Exprs[id]
+
+		args := []interface{}{"i", i, "id", id /*"tp", p.EType[id], */, "typ", tlog.NextAsType, x, "val", x}
+
+		if l, ok := x.(ir.Label); ok {
+			args = append(args, "l_in", lin[l])
+		}
+
+		var ls [][2]int
+
+		for k, l := range loops {
+			if l.IsSet(i) {
+				ls = append(ls, k)
+			}
+		}
+
+		if len(ls) != 0 {
+			args = append(args, "loops", ls)
+		}
+
+		if v, ok := merges[i]; ok {
+			args = append(args, "merge", v)
+		}
+
+		tr.Printw("code", args...)
+
+		p.loop[i] = len(ls)
+	}
+
+	return nil
 }
 
 func (c *Compiler) findLoops(ctx context.Context, p *pkgContext, f *ir.Func) (err error) {
@@ -382,6 +689,7 @@ func (c *Compiler) calcGraph(ctx context.Context, p *pkgContext, f *ir.Func) (er
 			switch x := x.(type) {
 			case ir.Imm, ir.Args, ir.Out /*, ir.State, ir.Effect*/ :
 			case ir.Cmp, ir.Add, ir.Sub, ir.Mul, ir.Div, ir.Mod:
+			case ir.BitAnd, ir.BitOr:
 				//	case ir.Ptr, ir.Load, ir.Offset:
 				//	case ir.Store:
 				//	case ir.Alloc:
@@ -491,18 +799,6 @@ func (c *Compiler) calcGraph(ctx context.Context, p *pkgContext, f *ir.Func) (er
 
 			switch x := x.(type) {
 			case ir.Imm, ir.Args, ir.Out /*, ir.State, ir.Effect*/ :
-			case ir.Cmp:
-				setID(x.L, x.R)
-			case ir.Add:
-				setID(x.L, x.R)
-			case ir.Sub:
-				setID(x.L, x.R)
-			case ir.Mul:
-				setID(x.L, x.R)
-			case ir.Div:
-				setID(x.L, x.R)
-			case ir.Mod:
-				setID(x.L, x.R)
 				//	case ir.Ptr, ir.Load, ir.Offset:
 				//	case ir.Store:
 				//	case ir.Alloc:
@@ -533,6 +829,22 @@ func (c *Compiler) calcGraph(ctx context.Context, p *pkgContext, f *ir.Func) (er
 			//	vals.Set(int(x.StateIn))
 			//	vals.Set(int(x.EffectIn))
 			//	case tp.Array, tp.Int:
+			case ir.Cmp:
+				setID(x.L, x.R)
+			case ir.Add:
+				setID(x.L, x.R)
+			case ir.Sub:
+				setID(x.L, x.R)
+			case ir.Mul:
+				setID(x.L, x.R)
+			case ir.Div:
+				setID(x.L, x.R)
+			case ir.Mod:
+				setID(x.L, x.R)
+			case ir.BitAnd:
+				setID(x.L, x.R)
+			case ir.BitOr:
+				setID(x.L, x.R)
 			default:
 				panic(x)
 			}
@@ -628,4 +940,32 @@ func (c *Compiler) calcGraph(ctx context.Context, p *pkgContext, f *ir.Func) (er
 	}
 
 	return nil
+}
+
+func (jobs *Jobs) Pop() Job {
+	last := len(*jobs) - 1
+
+	top := (*jobs)[last]
+	*jobs = (*jobs)[:last]
+
+	return top
+}
+
+func (jobs *Jobs) Push(j Job) {
+	*jobs = append(*jobs, j)
+}
+
+func (w walked) String() string {
+	switch w {
+	case walkNone:
+		return "0"
+	case walkLoop:
+		return "loop"
+	case walkMerge:
+		return "merge"
+	case walkEnd:
+		return "end"
+	default:
+		return fmt.Sprintf("%d", int(w))
+	}
 }

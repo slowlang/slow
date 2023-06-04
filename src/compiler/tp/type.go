@@ -10,6 +10,7 @@ type (
 		MemSize() int
 	}
 
+	Bool    struct{}
 	Cmp     struct{}
 	TypeDef struct{}
 	State   struct{}

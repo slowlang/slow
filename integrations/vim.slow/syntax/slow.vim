@@ -14,7 +14,7 @@ set foldminlines=3 foldnestmax=3
 
 " base
 
-syntax keyword	Keyword			package if else for return var let const type
+syntax keyword	Keyword			package if else for return var let const type continue break goto
 syntax keyword	basicTypes		string byte rune bool
 syntax keyword	standardTypes	error context.Context
 syntax keyword	todo			TODO NOTE containedin=comment

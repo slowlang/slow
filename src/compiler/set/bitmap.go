@@ -194,10 +194,10 @@ func (s *Bitmap) Len() int {
 	return s.Last() + 1
 }
 
-func (s *Bitmap) TlogAppend(b []byte) []byte {
+func (s Bitmap) TlogAppend(b []byte) []byte {
 	var e tlwire.LowEncoder
 
-	if s == nil {
+	if s.b == nil {
 		return e.AppendNil(b)
 	}
 
