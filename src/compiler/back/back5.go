@@ -6,8 +6,8 @@ import (
 
 	"github.com/nikandfor/errors"
 	"github.com/nikandfor/tlog"
-	"github.com/slowlang/slow/src/compiler/bitmap"
 	"github.com/slowlang/slow/src/compiler/ir"
+	"github.com/slowlang/slow/src/compiler/set"
 )
 
 type (
@@ -33,8 +33,8 @@ type (
 		//	lin map[ir.Label][]ir.Expr
 
 		loop  []int // index -> depth
-		slots map[ir.Expr]*bitmap.Big
-		edges map[ir.Expr]*bitmap.Big
+		slots map[ir.Expr]*set.Bitmap
+		edges map[ir.Expr]*set.Bitmap
 	}
 
 	Reg int
@@ -149,6 +149,16 @@ func (c *Compiler) compileFunc(ctx context.Context, b []byte, p *pkgContext, f *
 	}
 
 	return b, nil
+}
+
+func (c *Compiler) walkFunc(ctx context.Context, p *pkgContext, f *ir.Func) (err error) {
+	tr := tlog.SpanFromContext(ctx)
+
+	visit := set.MakeBitmap(len(f.Code))
+
+	for {
+		_, _ = tr, visit
+	}
 }
 
 func (c *Compiler) findLoops(ctx context.Context, p *pkgContext, f *ir.Func) (err error) {
@@ -275,7 +285,7 @@ func (c *Compiler) findLoops(ctx context.Context, p *pkgContext, f *ir.Func) (er
 			}
 		}
 
-		tr.Printw("done", "i", i, "loop_cur", loop)
+		tr.Printw("walked to end", "i", i, "walked", loop)
 	}
 
 	add := func(i int) {
@@ -339,21 +349,21 @@ func (c *Compiler) findLoops(ctx context.Context, p *pkgContext, f *ir.Func) (er
 func (c *Compiler) calcGraph(ctx context.Context, p *pkgContext, f *ir.Func) (err error) {
 	tr := tlog.SpanFromContext(ctx)
 
-	p.slots = make(map[ir.Expr]*bitmap.Big, len(f.Code))
-	labelhave := make(map[ir.Label]*bitmap.Big)
-	labelneed := make(map[ir.Label]map[ir.Expr]*bitmap.Big) // B -> slots
+	p.slots = make(map[ir.Expr]*set.Bitmap, len(f.Code))
+	labelhave := make(map[ir.Label]*set.Bitmap)
+	labelneed := make(map[ir.Label]map[ir.Expr]*set.Bitmap) // B -> slots
 
 	for _, id := range f.Code {
 		switch x := p.Exprs[id].(type) {
 		case ir.Label:
-			labelhave[x] = bitmap.New()
-			labelneed[x] = make(map[ir.Expr]*bitmap.Big)
+			labelhave[x] = set.NewBitmap(0)
+			labelneed[x] = make(map[ir.Expr]*set.Bitmap)
 		}
 	}
 
-	vals := bitmap.Make()
+	vals := set.MakeBitmap(len(f.Code))
 
-	set := func(ids ...ir.Expr) {
+	setID := func(ids ...ir.Expr) {
 		for _, id := range ids {
 			vals.Set(int(id))
 		}
@@ -367,7 +377,7 @@ func (c *Compiler) calcGraph(ctx context.Context, p *pkgContext, f *ir.Func) (er
 		for i, id := range f.Code {
 			x := p.Exprs[id]
 
-			set(id)
+			setID(id)
 
 			switch x := x.(type) {
 			case ir.Imm, ir.Args, ir.Out /*, ir.State, ir.Effect*/ :
@@ -396,7 +406,7 @@ func (c *Compiler) calcGraph(ctx context.Context, p *pkgContext, f *ir.Func) (er
 						break
 					}
 
-					set(id)
+					setID(id)
 				}
 			case ir.B:
 				vals.Clear(int(id))
@@ -409,7 +419,7 @@ func (c *Compiler) calcGraph(ctx context.Context, p *pkgContext, f *ir.Func) (er
 			//		vals.Clear(int(xx.Expr))
 			//	}
 
-			//	set(id)
+			//	setID(id)
 			case ir.Call:
 				// TODO
 				//	case tp.Array, tp.Int:
@@ -434,7 +444,7 @@ func (c *Compiler) calcGraph(ctx context.Context, p *pkgContext, f *ir.Func) (er
 		vals.Reset()
 	}
 
-	var phis map[ir.Expr]*bitmap.Big
+	var phis map[ir.Expr]*set.Bitmap
 
 	for pass := 0; pass < 2; pass++ {
 		vals.Reset()
@@ -482,17 +492,17 @@ func (c *Compiler) calcGraph(ctx context.Context, p *pkgContext, f *ir.Func) (er
 			switch x := x.(type) {
 			case ir.Imm, ir.Args, ir.Out /*, ir.State, ir.Effect*/ :
 			case ir.Cmp:
-				set(x.L, x.R)
+				setID(x.L, x.R)
 			case ir.Add:
-				set(x.L, x.R)
+				setID(x.L, x.R)
 			case ir.Sub:
-				set(x.L, x.R)
+				setID(x.L, x.R)
 			case ir.Mul:
-				set(x.L, x.R)
+				setID(x.L, x.R)
 			case ir.Div:
-				set(x.L, x.R)
+				setID(x.L, x.R)
 			case ir.Mod:
-				set(x.L, x.R)
+				setID(x.L, x.R)
 				//	case ir.Ptr, ir.Load, ir.Offset:
 				//	case ir.Store:
 				//	case ir.Alloc:
@@ -504,22 +514,22 @@ func (c *Compiler) calcGraph(ctx context.Context, p *pkgContext, f *ir.Func) (er
 				phis = nil
 			case ir.B:
 			case ir.BCond:
-				set(x.Expr)
+				setID(x.Expr)
 			case ir.Phi:
 				if phis == nil {
-					phis = make(map[ir.Expr]*bitmap.Big)
+					phis = make(map[ir.Expr]*set.Bitmap)
 				}
 
 				for _, xx := range x {
-					//	set(xx.Expr)
+					//	setID(xx.Expr)
 					if _, ok := phis[xx.B]; !ok {
-						phis[xx.B] = bitmap.New()
+						phis[xx.B] = set.NewBitmap(len(f.Code))
 					}
 
 					phis[xx.B].Set(int(xx.Expr))
 				}
 			case ir.Call:
-				set(x.In...)
+				setID(x.In...)
 			//	vals.Set(int(x.StateIn))
 			//	vals.Set(int(x.EffectIn))
 			//	case tp.Array, tp.Int:
@@ -551,7 +561,7 @@ func (c *Compiler) calcGraph(ctx context.Context, p *pkgContext, f *ir.Func) (er
 				break
 			}
 
-			set(jid)
+			setID(jid)
 		}
 
 		for k := i; k < j; k++ {
@@ -570,7 +580,7 @@ func (c *Compiler) calcGraph(ctx context.Context, p *pkgContext, f *ir.Func) (er
 		}
 	}
 
-	p.edges = make(map[ir.Expr]*bitmap.Big)
+	p.edges = make(map[ir.Expr]*set.Bitmap)
 	clique := 0
 
 	for _, id := range f.Code {
@@ -585,7 +595,7 @@ func (c *Compiler) calcGraph(ctx context.Context, p *pkgContext, f *ir.Func) (er
 			clique = c
 		}
 
-		p.edges[id] = bitmap.New()
+		p.edges[id] = set.NewBitmap(len(f.Code))
 
 		p.slots[id].Range(func(xi int) bool {
 			x := ir.Expr(xi)
@@ -595,7 +605,7 @@ func (c *Compiler) calcGraph(ctx context.Context, p *pkgContext, f *ir.Func) (er
 			}
 
 			if _, ok := p.edges[x]; !ok {
-				p.edges[x] = bitmap.New()
+				p.edges[x] = set.NewBitmap(len(f.Code))
 			}
 
 			p.edges[id].Set(xi)
