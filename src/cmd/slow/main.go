@@ -10,6 +10,7 @@ import (
 	"github.com/nikandfor/tlog"
 	"github.com/nikandfor/tlog/ext/tlflag"
 	"github.com/nikandfor/tlog/tlio"
+
 	"github.com/slowlang/slow/src/compiler"
 )
 
@@ -25,7 +26,7 @@ func main() {
 		Description: "slow is a tool for managining slow source code",
 		Before:      before,
 		Flags: []*cli.Flag{
-			cli.NewFlag("log", "stderr:dm", "log destination"),
+			cli.NewFlag("log", "stderr?dm", "log destination"),
 			cli.NewFlag("v", "", "log verbosity"),
 			cli.NewFlag("debug", "", "debug http address"),
 

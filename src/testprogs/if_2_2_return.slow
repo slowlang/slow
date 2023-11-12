@@ -1,0 +1,17 @@
+package main
+
+func main(x int) int {
+	if x % 2 == 0 {
+		if x % 3 == 0 {
+			return 1
+		} else {
+			return 2
+		}
+	} else {
+		if x % 3 == 0 {
+			return 3
+		} else {
+			return 4
+		}
+	}
+}

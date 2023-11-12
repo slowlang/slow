@@ -1,0 +1,6 @@
+package main
+
+func main(argc int) int {
+	return 2 * argc + 10 - argc / 3
+}
+

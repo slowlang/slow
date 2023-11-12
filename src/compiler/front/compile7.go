@@ -106,7 +106,7 @@ func (c *Front) Compile(ctx context.Context) (_ *ir.Package, err error) {
 	p.untyped = ir.Type(p.alloc(tp.Untyped{}, 0))
 	p.typeDef = ir.Type(p.alloc(tp.TypeDef{}, p.untyped))
 
-	p.zero = p.alloc(tp.Unit{}, p.untyped)
+	p.zero = p.alloc(ir.Zero{}, p.untyped)
 
 	p.unit = p.addType(tp.Unit{})
 	p.cmpt = p.addType(tp.Cmp{})
@@ -197,6 +197,9 @@ func (c *Front) compileFunc(ctx context.Context, par *Scope, d *ast.FuncDecl) (f
 	}
 	ftp := &tp.Func{}
 
+	tpid := par.addType(ftp)
+	fid = par.alloc(f, tpid)
+
 	s := par.nextScope(-1, 1, par)
 	s.funContext = &funContext{
 		Func: f,
@@ -251,9 +254,6 @@ func (c *Front) compileFunc(ctx context.Context, par *Scope, d *ast.FuncDecl) (f
 		}
 	}
 
-	tpid := par.addType(ftp)
-	fid = par.alloc(f, tpid)
-
 	par.define(f.Name, fid)
 	par.Funcs = append(par.Funcs, fid)
 
@@ -274,7 +274,7 @@ func (c *Front) compileFunc(ctx context.Context, par *Scope, d *ast.FuncDecl) (f
 				continue
 			}
 
-			b := p.finalBranch()
+			b := p.findBranch(s.exit.lab)
 
 			phi = append(phi, ir.PhiBranch{
 				B:    b,
@@ -375,6 +375,10 @@ func (c *Front) compileBlock(ctx context.Context, s *Scope, b *ast.BlockStmt) (_
 }
 
 func (c *Front) compileStmt(ctx context.Context, s *Scope, x ast.Stmt) (_ *Scope, err error) {
+	tr := tlog.SpanFromContext(ctx)
+
+	tr.V("stmt").Printw("statement", "typ", tlog.NextAsType, x, "val", x)
+
 	switch x := x.(type) {
 	case *ast.ReturnStmt:
 		ids := make([]ir.Expr, len(x.Results))
@@ -386,7 +390,7 @@ func (c *Front) compileStmt(ctx context.Context, s *Scope, x ast.Stmt) (_ *Scope
 			}
 		}
 
-		tlog.SpanFromContext(ctx).Printw("return", "ids", ids)
+		tr.Printw("return", "ids", ids)
 
 		s.ret(ids)
 	case *ast.AssignStmt:
@@ -404,17 +408,19 @@ func (c *Front) compileStmt(ctx context.Context, s *Scope, x ast.Stmt) (_ *Scope
 		}
 
 		for i, e := range x.Lhs {
-			if v, ok := e.(*ast.Ident); ok {
-				if x.Tok == token.DEFINE {
-					s.define(v.Name, ids[i])
-				} else {
-					s.assign(v.Name, ids[i])
-				}
-
-				continue
+			id, ok := e.(*ast.Ident)
+			if !ok {
+				panic(e)
 			}
 
-			panic(e)
+			switch x.Tok {
+			case token.DEFINE:
+				s.define(id.Name, ids[i])
+			case token.ASSIGN:
+				s.assign(id.Name, ids[i])
+			default:
+				panic(x.Tok)
+			}
 		}
 	case *ast.IfStmt:
 		s, err = c.compileIf(ctx, s, x)
@@ -458,9 +464,8 @@ func (c *Front) compileIf(ctx context.Context, prev *Scope, x *ast.IfStmt) (_ *S
 
 		scond.branchCond(next, condExpr, revcond(cond))
 
-		//	sub := scond.nextScope(scond.label(), 1, scond)
-		//	scond.branchTo(sub)
-		sub := scond
+		sub := scond.nextScope(scond.label(), 1, scond)
+		scond.branchTo(sub)
 
 		sub, err = c.compileBlock(ctx, sub, x.Body)
 		if err != nil {
@@ -473,7 +478,7 @@ func (c *Front) compileIf(ctx context.Context, prev *Scope, x *ast.IfStmt) (_ *S
 	}
 
 	for q := x; q != nil; {
-		cond, condExpr, err := c.compileCond(ctx, scond, x.Cond)
+		cond, condExpr, err := c.compileCond(ctx, scond, q.Cond)
 		if err != nil {
 			return nil, errors.Wrap(err, "if cond")
 		}
@@ -990,7 +995,8 @@ func (s *Scope) mergeValues(def definition, visited visitSet) ir.Phi {
 	var phi ir.Phi
 
 	for _, p := range s.prev {
-		b := p.finalBranch()
+		b := p.findBranch(s.lab)
+
 		id := p.findValue(def, visited)
 		if id == walkCycled {
 			continue
@@ -1067,11 +1073,23 @@ func (s *Scope) branchCond(to *Scope, expr ir.Expr, cond ir.Cond) {
 	tlog.V("branch").Printw("branch cond", "lab", to.lab, "b", id, "dst", to.ptr(), "src", s.ptr(), "expr", id, "cond", cond, "from", loc.Callers(1, 3))
 }
 
-func (s *Scope) finalBranch() ir.Expr {
-	if l := len(s.code); l != 0 {
-		id := s.code[l-1]
-		if _, ok := s.Exprs[id].(ir.B); ok {
-			return id
+func (s *Scope) findBranch(lab ir.Label) ir.Expr {
+	if lab == -1 {
+		panic(lab)
+	}
+
+	for i := len(s.code) - 1; i >= 0; i-- {
+		id := s.code[i]
+
+		switch b := s.Exprs[id].(type) {
+		case ir.B:
+			if b.Label == lab {
+				return id
+			}
+		case ir.BCond:
+			if b.Label == lab {
+				return id
+			}
 		}
 	}
 

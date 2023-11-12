@@ -8,6 +8,7 @@ type (
 
 	Args int
 	Out  Expr
+	Zero struct{}
 
 	Label int
 	Cond  string
@@ -68,6 +69,21 @@ type (
 		Label Label
 	}
 
+	Assert struct {
+		Expr Expr
+	}
+
+	Pred struct {
+		Expr Expr
+		Cond Cond
+	}
+
+	//
+
+	Cmp struct {
+		L, R Expr
+	}
+
 	Add struct {
 		L, R Expr
 	}
@@ -85,10 +101,6 @@ type (
 	}
 
 	Mod struct {
-		L, R Expr
-	}
-
-	Cmp struct {
 		L, R Expr
 	}
 

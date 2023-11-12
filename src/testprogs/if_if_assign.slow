@@ -1,0 +1,16 @@
+package main
+
+func main(argc int) (r int) {
+	r = 1
+
+	if argc > 4 {
+		if argc > 6 {
+			r = 3
+		} else {
+			r = 2
+		}
+	}
+
+	return r
+}
+

@@ -1,0 +1,19 @@
+package main
+
+func main(x int) (r int) {
+	if x <= 100 {
+		if x <= 10 {
+			if x <= 1 {
+				r = 1
+			} else {
+				r = 10
+			}
+		} else {
+			r = 100
+		}
+	} else {
+		r = 200
+	}
+
+	return r
+}

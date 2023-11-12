@@ -22,6 +22,7 @@ What I cannot create, I do not understand.
 
 * *Sebastian Hack, Daniel Grund, and Gerhard Goos* - Register Allocation for Programs in SSA-Form ([compilers.cs.uni-saarland.de](https://compilers.cs.uni-saarland.de/papers/ssara.pdf))
 * *Nico Reissmann, Jan Christian Meyer, Helge Bahmann, and Magnus Sj¨alander* - RVSDG: An Intermediate Representation for Optimizing Compilers ([arxiv.org](https://arxiv.org/pdf/1912.05036.pdf))
+* *Paul E. McKenney* - Memory Barriers: a Hardware View for Software Hackers ([puppetmastertrading.com](https://www.puppetmastertrading.com/images/hwViewForSwHackers.pdf))
 
 ## Articles
 
@@ -35,7 +36,8 @@ What I cannot create, I do not understand.
 
 ## Documentation
 
-* ARM - Learn the architecture - AArch64 Instruction Set Architecture ([developer.arm.com](https://developer.arm.com/documentation/102374/0100))
+* *ARM* - Learn the architecture - AArch64 Instruction Set Architecture ([developer.arm.com](https://developer.arm.com/documentation/102374/0100))
+* *Linux Kernel* - eBPF Verifier ([docs.kernel.org](https://docs.kernel.org/bpf/verifier.html))
 
 ## Courses
 

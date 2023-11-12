@@ -1,0 +1,27 @@
+package main
+
+func main(x, y int) (r int) {
+	if x == 20 {
+		return 2
+	}
+
+	if x <= 1 {
+		r = 1
+	} else if x <= 10 {
+		return 10
+	} else if x <= 100 {
+		r = 100
+	} else {
+		return 200
+	}
+
+	r = r + y
+
+	if r < 9 {
+		r = r + 1
+	} else {
+		r = r - 3
+	}
+
+	return r
+}

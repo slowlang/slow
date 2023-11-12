@@ -11,7 +11,6 @@ let b:current_syntax = "slow"
 syntax case match
 set foldminlines=3 foldnestmax=3
 
-
 " base
 
 syntax keyword	Keyword			package if else for return var let const type continue break goto
@@ -19,7 +18,7 @@ syntax keyword	basicTypes		string byte rune bool
 syntax keyword	standardTypes	error context.Context
 syntax keyword	todo			TODO NOTE containedin=comment
 
-syntax match	intTypes		"\v<u=int\d*>"
+syntax match	intTypes		"\v<u?int\d*>"
 
 syntax cluster	Type			contains=basicTypes,standardTypes,intTypes
 
@@ -55,7 +54,7 @@ hi def link		funcCall		Type
 
 " nil
 
-syntax keyword	nilkw			nil	containedin=funcBody
+syntax keyword	nilkw			nil	containedin=funcBody,funcArgs
 
 hi def link		nilkw			Constant
 
