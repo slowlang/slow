@@ -8,9 +8,9 @@ import (
 	"path"
 	"sort"
 
-	"github.com/nikandfor/errors"
-	"github.com/nikandfor/loc"
-	"github.com/nikandfor/tlog"
+	"tlog.app/go/errors"
+	"tlog.app/go/loc"
+	"tlog.app/go/tlog"
 	"github.com/slowlang/slow/src/compiler/bitmap"
 	"github.com/slowlang/slow/src/compiler/ir"
 	"github.com/slowlang/slow/src/compiler/tp"

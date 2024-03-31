@@ -1,6 +1,6 @@
 package ir
 
-import "github.com/nikandfor/tlog/tlwire"
+import "tlog.app/go/tlog/tlwire"
 
 type (
 	Expr int

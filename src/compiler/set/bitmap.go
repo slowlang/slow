@@ -3,7 +3,7 @@ package set
 import (
 	"math/bits"
 
-	"github.com/nikandfor/tlog/tlwire"
+	"tlog.app/go/tlog/tlwire"
 )
 
 type (

@@ -5,9 +5,10 @@ import (
 	"fmt"
 	"sort"
 
-	"github.com/nikandfor/errors"
-	"github.com/nikandfor/tlog"
-	"github.com/nikandfor/tlog/tlwire"
+	"tlog.app/go/errors"
+	"tlog.app/go/tlog"
+	"tlog.app/go/tlog/tlwire"
+
 	"github.com/slowlang/slow/src/compiler/df"
 	"github.com/slowlang/slow/src/compiler/ir"
 	"github.com/slowlang/slow/src/compiler/set"

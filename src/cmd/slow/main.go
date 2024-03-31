@@ -5,11 +5,11 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/nikandfor/cli"
-	"github.com/nikandfor/errors"
-	"github.com/nikandfor/tlog"
-	"github.com/nikandfor/tlog/ext/tlflag"
-	"github.com/nikandfor/tlog/tlio"
+	"nikand.dev/go/cli"
+	"tlog.app/go/errors"
+	"tlog.app/go/tlog"
+	"tlog.app/go/tlog/ext/tlflag"
+	"tlog.app/go/tlog/tlio"
 
 	"github.com/slowlang/slow/src/compiler"
 )

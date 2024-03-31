@@ -4,8 +4,8 @@ import (
 	"context"
 	"os"
 
-	"github.com/nikandfor/errors"
-	"github.com/nikandfor/tlog"
+	"tlog.app/go/errors"
+	"tlog.app/go/tlog"
 
 	"github.com/slowlang/slow/src/compiler/back"
 	"github.com/slowlang/slow/src/compiler/front"

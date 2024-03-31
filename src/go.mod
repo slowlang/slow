@@ -1,21 +1,23 @@
 module github.com/slowlang/slow/src
 
-go 1.18
+go 1.21
+
+toolchain go1.22.1
 
 require (
-	github.com/nikandfor/assert v0.0.0-20221129185021-704c04a067ef
-	github.com/nikandfor/cli v0.0.0-20230428202915-fdf5f3ba6b67
-	github.com/nikandfor/errors v0.8.0
-	github.com/nikandfor/loc v0.5.0
-	github.com/nikandfor/tlog v0.21.3-0.20230601003201-8b4dc5bdac4f
-	github.com/stretchr/testify v1.8.1
+	github.com/stretchr/testify v1.8.4
+	nikand.dev/go/cli v0.0.0-20231112170903-c354aca481d7
+	tlog.app/go/errors v0.9.0
+	tlog.app/go/loc v0.6.1
+	tlog.app/go/tlog v0.23.1
 )
 
 require (
 	github.com/davecgh/go-spew v1.1.1 // indirect
-	github.com/nikandfor/hacked v0.0.0-20230429073333-a318d546207a // indirect
+	github.com/nikandfor/hacked v0.0.0-20231207014854-3b383967fdf4 // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect
-	golang.org/x/sys v0.7.0 // indirect
-	golang.org/x/term v0.7.0 // indirect
+	golang.org/x/sys v0.17.0 // indirect
+	golang.org/x/term v0.17.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
+	tlog.app/go/eazy v0.3.0 // indirect
 )
