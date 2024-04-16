@@ -1,3 +1,5 @@
+//go:build ignore
+
 package back
 
 import (
@@ -41,12 +43,13 @@ type (
 		edges map[ir.Expr]*set.Bitmap
 	}
 
-	Reg int
-
 	BChoice struct {
 		B     int
 		Taken int
 	}
+
+	Reg int
+	Mov struct{ W, R Reg }
 
 	Job struct {
 		i, p    int
@@ -113,8 +116,6 @@ _start:
 	RET
 `, pkg.Path)
 
-	b = nil
-
 	for _, fid := range p.Funcs {
 		f := p.Exprs[fid].(*ir.Func)
 
@@ -124,6 +125,10 @@ _start:
 		if err != nil {
 			return nil, errors.Wrap(err, "func %v", f.Name)
 		}
+	}
+
+	if tr.If("omit_out") {
+		b = nil
 	}
 
 	return b, nil
@@ -2073,6 +2078,14 @@ func (c BChoice) TlogAppend(b []byte) []byte {
 	b = e.AppendInt(b, int(c.B))
 	b = e.AppendSemantic(b, tlwire.Hex)
 	b = e.AppendInt(b, int(c.Taken))
+
+	return b
+}
+
+func permutate(b []byte, l []Mov) []byte {
+	b = fmt.Appendf(b, "\t// permutate %v\n", l)
+
+	//	return fmt.Appendf(b, "\tMOV\tX%d, X%d\n", l[0].W, l[0].R)
 
 	return b
 }

@@ -1,0 +1,36 @@
+package main
+
+func main(x int) int {
+	r := 0
+
+	if x < 5 {
+		i := 0
+
+		for i < 4 {
+			j := 0
+
+			for j < 3 {
+				r++
+				j++
+			}
+
+			i++
+		}
+	} else {
+		i := 0
+
+		for i < 4 {
+			r++
+			i++
+		}
+
+		i = 0
+
+		for i < 3 {
+			r++
+			i++
+		}
+	}
+
+	return r
+}

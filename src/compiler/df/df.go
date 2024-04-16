@@ -6,29 +6,24 @@ type (
 	Expr = ir.Expr
 	Out  = ir.Out
 
-	Alias ir.Expr
-
 	Cond = ir.Cond
 
+	Alias ir.Expr
+
 	Tuple []Expr
-
-	RawBlock struct {
-		In  []Expr
-		Out []Expr
-
-		Code []Expr
-	}
 
 	Pred struct {
 		Expr Expr
 		Cond Cond
 	}
 
-	Switch struct {
-		Preds    []Pred
-		Branches []Tuple // for each pred + else
+	Block struct {
+		In  []Expr
+		Out []Expr
+
+		Code []Expr
 	}
 
-	Loop struct {
-	}
+	Break struct{}
+	Loop  struct{}
 )

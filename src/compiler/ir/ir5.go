@@ -120,11 +120,19 @@ type (
 		L, R Expr
 	}
 
-	LShift struct {
+	LogicShiftLeft struct {
 		L, R Expr
 	}
 
-	RShift struct {
+	LogicShiftRight struct {
+		L, R Expr
+	}
+
+	ArithShiftRight struct {
+		L, R Expr
+	}
+
+	RotateRight struct {
 		L, R Expr
 	}
 )

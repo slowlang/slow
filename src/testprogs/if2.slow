@@ -14,3 +14,20 @@ func main(argc int) (rc int) {
 
 	return c
 }
+
+/*
+
+	// X0              // argc, a
+	MOV		X1, 3      // b
+	ADD		X2, X0, X1 // c
+	CMP		X0, X1
+
+	B.GE	else
+	ADD		X0, X2, X0 // c
+	B		endif
+else:
+	ADD		X0, X2, X1 // c
+endif:
+
+	RET
+*/

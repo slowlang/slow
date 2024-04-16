@@ -42,6 +42,7 @@ type (
 		nextdef definition
 
 		queue map[string]any
+		imms  map[ir.Imm]ir.Expr
 	}
 
 	funContext struct {
@@ -102,6 +103,7 @@ func (c *Front) Compile(ctx context.Context) (_ *ir.Package, err error) {
 	p := &pkgContext{
 		Package: &ir.Package{},
 		queue:   make(map[string]any),
+		imms:    make(map[ir.Imm]ir.Expr),
 	}
 
 	p.untyped = ir.Type(p.alloc(tp.Untyped{}, 0))
@@ -409,10 +411,7 @@ func (c *Front) compileStmt(ctx context.Context, s *Scope, x ast.Stmt) (_ *Scope
 		}
 
 		for i, e := range x.Lhs {
-			id, ok := e.(*ast.Ident)
-			if !ok {
-				panic(e)
-			}
+			id := e.(*ast.Ident)
 
 			switch x.Tok {
 			case token.DEFINE:
@@ -423,6 +422,35 @@ func (c *Front) compileStmt(ctx context.Context, s *Scope, x ast.Stmt) (_ *Scope
 				panic(x.Tok)
 			}
 		}
+	case *ast.IncDecStmt:
+		id := x.X.(*ast.Ident)
+		val := s.value(id.Name)
+		if val < 0 {
+			panic(id.Name)
+		}
+
+		tp := s.EType[val]
+		one := s.add(ir.Imm(1), tp)
+
+		var op any
+
+		switch x.Tok {
+		case token.INC:
+			op = ir.Add{
+				L: val,
+				R: one,
+			}
+		case token.DEC:
+			op = ir.Sub{
+				L: val,
+				R: one,
+			}
+		default:
+			panic(x.Tok)
+		}
+
+		res := s.add(op, tp)
+		s.assign(id.Name, res)
 	case *ast.IfStmt:
 		s, err = c.compileIf(ctx, s, x)
 		if err != nil {
@@ -439,8 +467,15 @@ func (c *Front) compileStmt(ctx context.Context, s *Scope, x ast.Stmt) (_ *Scope
 			s.branchFind(-1, func(s *Scope) *Scope { return s.breakDst })
 		case token.CONTINUE:
 			s.branchFind(-1, func(s *Scope) *Scope { return s.continueDst })
+			//	case token.GOTO:
+			//		s.branchFind(-1)
 		default:
 			panic(x)
+		}
+	case *ast.LabeledStmt:
+		s, err = c.compileLabeled(ctx, s, x)
+		if err != nil {
+			return s, errors.Wrap(err, "labeled")
 		}
 	default:
 		panic(x)
@@ -642,6 +677,20 @@ func (c *Front) compileFor(ctx context.Context, prev *Scope, x *ast.ForStmt) (_ 
 	tr.Printw("for next", "ptr", snext.ptr(), "lab", snext.lab)
 
 	return snext, nil
+}
+
+func (c *Front) compileLabeled(ctx context.Context, prev *Scope, x *ast.LabeledStmt) (_ *Scope, err error) {
+	//	tr := tlog.SpanFromContext(ctx)
+
+	lab := prev.label()
+	s := prev.nextScope(lab, 0, prev)
+
+	s, err = c.compileStmt(ctx, s, x.Stmt)
+	if err != nil {
+		return nil, errors.Wrap(err, "stmt")
+	}
+
+	return s, nil
 }
 
 func (c *Front) compileCond(ctx context.Context, s *Scope, e ast.Expr) (cc ir.Cond, id ir.Expr, err error) {
@@ -883,8 +932,18 @@ func (s *Scope) addphi(x any, tp ir.Type) ir.Expr {
 }
 
 func (s *Scope) add(x any, tp ir.Type) ir.Expr {
+	//	if v, ok := x.(ir.Imm); ok {
+	//		if id, ok := s.imms[v]; ok {
+	//			return id
+	//		}
+	//	}
+
 	id := s.pkgContext.alloc(x, tp)
 	s.code = append(s.code, id)
+
+	//	if v, ok := x.(ir.Imm); ok {
+	//		s.imms[v] = id
+	//	}
 
 	return id
 }
@@ -1027,11 +1086,9 @@ func (s *Scope) branchFind(lab ir.Label, f func(s *Scope) *Scope) {
 	var dst *Scope
 
 	ok := s.find(func(s *Scope) bool {
-		if dst = f(s); dst != nil && (lab == -1 || (s.lab == lab)) {
-			return true
-		}
+		dst = f(s)
 
-		return false
+		return dst != nil && (lab == -1 || (s.lab == lab))
 	})
 	if !ok {
 		panic("break dst not found")

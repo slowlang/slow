@@ -64,7 +64,7 @@ func before(c *cli.Command) (err error) {
 	if w, ok := w.(tlio.MultiWriter); ok {
 		for _, w := range w {
 			if w, ok := w.(*tlog.ConsoleWriter); ok {
-				w.Flags = tlog.Ltime | tlog.Lshortfile
+				w.Flags = /* tlog.Ltime | */ tlog.Lshortfile
 				w.LevelWidth = 1
 				w.Shortfile = 14
 				w.MessageWidth = 20
