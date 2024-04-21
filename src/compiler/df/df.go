@@ -15,15 +15,20 @@ type (
 	Pred struct {
 		Expr Expr
 		Cond Cond
+		Held bool
 	}
 
-	Block struct {
+	RawBlock struct {
 		In  []Expr
 		Out []Expr
 
 		Code []Expr
 	}
 
-	Break struct{}
-	Loop  struct{}
+	Merge []MergeOut
+
+	MergeOut struct {
+		Expr  Expr
+		Preds []Pred
+	}
 )

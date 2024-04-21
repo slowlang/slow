@@ -493,12 +493,12 @@ func (c *Front) compileIf(ctx context.Context, prev *Scope, x *ast.IfStmt) (_ *S
 	next := prev.nextScope(prev.label(), 0)
 
 	if x.Else == nil {
-		cond, condExpr, err := c.compileCond(ctx, scond, x.Cond)
+		cond, err := c.compileCond(ctx, scond, x.Cond, true)
 		if err != nil {
 			return nil, errors.Wrap(err, "if cond")
 		}
 
-		scond.branchCond(next, condExpr, revcond(cond))
+		scond.branchCond(next, cond)
 
 		sub := scond.nextScope(scond.label(), 1, scond)
 		scond.branchTo(sub)
@@ -514,7 +514,7 @@ func (c *Front) compileIf(ctx context.Context, prev *Scope, x *ast.IfStmt) (_ *S
 	}
 
 	for q := x; q != nil; {
-		cond, condExpr, err := c.compileCond(ctx, scond, q.Cond)
+		cond, err := c.compileCond(ctx, scond, q.Cond, false)
 		if err != nil {
 			return nil, errors.Wrap(err, "if cond")
 		}
@@ -523,8 +523,7 @@ func (c *Front) compileIf(ctx context.Context, prev *Scope, x *ast.IfStmt) (_ *S
 		labels = append(labels, lab)
 
 		scond.add(ir.BCond{
-			Expr:  condExpr,
-			Cond:  cond,
+			Expr:  cond,
 			Label: lab,
 		}, prev.untyped)
 
@@ -655,12 +654,12 @@ func (c *Front) compileFor(ctx context.Context, prev *Scope, x *ast.ForStmt) (_ 
 	prev.branchTo(scond)
 
 	if x.Cond != nil {
-		cond, condExpr, err := c.compileCond(ctx, scond, x.Cond)
+		cond, err := c.compileCond(ctx, scond, x.Cond, false)
 		if err != nil {
 			return nil, errors.Wrap(err, "cond")
 		}
 
-		scond.branchCond(sbody, condExpr, cond)
+		scond.branchCond(sbody, cond)
 		scond.branchTo(snext)
 	}
 
@@ -693,22 +692,21 @@ func (c *Front) compileLabeled(ctx context.Context, prev *Scope, x *ast.LabeledS
 	return s, nil
 }
 
-func (c *Front) compileCond(ctx context.Context, s *Scope, e ast.Expr) (cc ir.Cond, id ir.Expr, err error) {
-	switch e := e.(type) {
-	case *ast.BinaryExpr:
-		switch op := e.Op.String(); op {
-		case "<", ">", "==", "!=", "<=", ">=":
-			cc = ir.Cond(op)
-		default:
-			return "", -1, errors.New("unsupported op: %q", e.Op)
-		}
-	default:
-		return "", -1, errors.New("unsupported expr: %T", e)
+func (c *Front) compileCond(ctx context.Context, s *Scope, e ast.Expr, rev bool) (id ir.Expr, err error) {
+	if !rev {
+		return c.compileExpr(ctx, s, e)
 	}
 
-	id, err = c.compileExpr(ctx, s, e)
-
-	return
+	switch e := e.(type) {
+	case *ast.BinaryExpr:
+		return c.compileExpr(ctx, s, &ast.BinaryExpr{
+			X:  e.X,
+			Y:  e.Y,
+			Op: revcond2(e.Op),
+		})
+	default:
+		return ir.Nil, errors.New("unsupported condition: %T", e)
+	}
 }
 
 func (c *Front) compileExpr(ctx context.Context, s *Scope, e ast.Expr) (id ir.Expr, err error) {
@@ -818,8 +816,9 @@ func (c *Front) compileExpr(ctx context.Context, s *Scope, e ast.Expr) (id ir.Ex
 			typ = s.Bool
 		case "<", ">", "<=", ">=", "==", "!=":
 			op = ir.Cmp{
-				L: l,
-				R: r,
+				L:    l,
+				R:    r,
+				Cond: ir.Cond(e.Op.String()),
 			}
 
 			typ = s.cmpt
@@ -1115,20 +1114,19 @@ func (s *Scope) branchTo(to *Scope) {
 	tlog.V("branch").Printw("branch to", "lab", to.lab, "b", id, "dst", to.ptr(), "src", s.ptr(), "from", loc.Callers(1, 3))
 }
 
-func (s *Scope) branchCond(to *Scope, expr ir.Expr, cond ir.Cond) {
+func (s *Scope) branchCond(to *Scope, expr ir.Expr) {
 	if to.labid == -1 {
 		panic(to)
 	}
 
 	id := s.add(ir.BCond{
 		Expr:  expr,
-		Cond:  cond,
 		Label: to.lab,
 	}, s.untyped)
 
 	to.appendPrev(s)
 
-	tlog.V("branch").Printw("branch cond", "lab", to.lab, "b", id, "dst", to.ptr(), "src", s.ptr(), "expr", id, "cond", cond, "from", loc.Callers(1, 3))
+	tlog.V("branch").Printw("branch cond", "lab", to.lab, "b", id, "dst", to.ptr(), "src", s.ptr(), "expr", id, "from", loc.Callers(1, 3))
 }
 
 func (s *Scope) findBranch(lab ir.Label) ir.Expr {
@@ -1291,5 +1289,16 @@ func revcond(x ir.Cond) ir.Cond {
 		return "<"
 	default:
 		panic(x)
+	}
+}
+
+func revcond2(t token.Token) token.Token {
+	switch t {
+	case token.LSS:
+		return token.GEQ
+	case token.GTR:
+		return token.LEQ
+	default:
+		panic(t)
 	}
 }

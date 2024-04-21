@@ -65,7 +65,6 @@ type (
 
 	BCond struct {
 		Expr  Expr
-		Cond  Cond
 		Label Label
 	}
 
@@ -82,6 +81,7 @@ type (
 
 	Cmp struct {
 		L, R Expr
+		Cond Cond
 	}
 
 	Add struct {
@@ -139,6 +139,17 @@ type (
 
 const (
 	Nil Expr = -1
+)
+
+const (
+	Eq = iota
+	Ne
+	Lt
+	Ge
+	Le
+	Gt
+	Bz
+	Bn
 )
 
 func (p PhiBranch) TlogAppend(b []byte) []byte {

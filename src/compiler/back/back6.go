@@ -8,6 +8,7 @@ import (
 	"github.com/slowlang/slow/src/compiler/ir"
 	"github.com/slowlang/slow/src/compiler/set"
 	"tlog.app/go/errors"
+	"tlog.app/go/loc"
 	"tlog.app/go/tlog"
 	"tlog.app/go/tlog/tlwire"
 )
@@ -40,22 +41,18 @@ type (
 	}
 
 	jobs2 struct {
-		l []job
-
-		merges []int
+		heap.Interface
+		q []job
 	}
 
 	job struct {
-		i    int
+		st   int
 		path []branch
 
-		reached int
+		wait int
 	}
 
-	branch struct {
-		i     int
-		taken int
-	}
+	branch int // index << 2 | notTaken << 1 | taken << 0
 
 	flatmap []int
 )
@@ -63,6 +60,8 @@ type (
 const (
 	bTaken = 1 << iota
 	bNotTaken
+
+	bMask = 1<<iota - 1
 )
 
 func New() *Compiler {
@@ -125,7 +124,7 @@ _start:
 }
 
 func (c *Compiler) compileFunc(ctx context.Context, b []byte, p *pkgContext, fn *ir.Func) (_ []byte, err error) {
-	tr, ctx := tlog.SpawnFromContextAndWrap(ctx, "compile func", "name", fn.Name)
+	tr, ctx := tlog.SpawnFromContextAndWrap(ctx, "compile func", "name", fn.Name, "in", fn.In, "out", fn.Out)
 	defer tr.Finish("err", &err)
 
 	f := &funContext{Func: fn}
@@ -138,67 +137,9 @@ func (c *Compiler) compileFunc(ctx context.Context, b []byte, p *pkgContext, fn 
 		}
 	}
 
-	{
+	{ // merges
 		labels := []int{}                    // label -> index
-		merges := make(flatmap, len(f.Code)) // index -> branches
-		lastLabel := -1
-
-		for i, id := range f.Code {
-			x := p.Exprs[id]
-
-			if l, ok := x.(ir.Label); ok {
-				labels = sliceSet(labels, l, i)
-
-				lastLabel = i
-			}
-
-			if p, ok := x.(ir.Phi); ok {
-				merges[lastLabel] = len(p)
-			}
-		}
-
-		fwd := set.MakeBitmap(64)
-		jobs := []int{0}
-
-		for len(jobs) != 0 {
-			j := jobs[len(jobs)-1]
-			jobs = jobs[:len(jobs)-1]
-
-			i := j
-
-			for i < len(f.Code) {
-				id := f.Code[i]
-				x := p.Exprs[id]
-
-				if _, ok := x.(ir.Label); ok {
-					if fwd.IsSet(i) {
-						// loop
-						break
-					}
-
-					fwd.Set(i)
-				}
-
-				if b, ok := x.(ir.B); ok {
-					i = labels[b.Label]
-				}
-
-				b, ok := x.(ir.BCond)
-				if !ok {
-					i++
-					continue
-				}
-
-				jobs = append(jobs, i+1)
-
-				i = labels[b.Label]
-			}
-		}
-	}
-
-	if false {
-		labels := []int{}                      // label -> index
-		merges := make(flatmap, len(f.Code)+1) // index -> inputs
+		merges := make(flatmap, len(f.Code)) // label index -> branches
 
 		lastLabel := -1
 
@@ -217,175 +158,175 @@ func (c *Compiler) compileFunc(ctx context.Context, b []byte, p *pkgContext, fn 
 		}
 
 		var jobs jobs
-		var visited set.Bits[ir.Label]
+		fwd := set.MakeBitmap(64)
 
-		jobs.merges = merges
+		jobs.Push(job{st: 0, path: []branch{}})
 
-		{ // forward
-			jobs.Push(job{i: 0, path: []branch{{i: -1}}})
+		for jobs.Len() != 0 {
+			j := jobs.Pop()
+			i := j.st
+			path := j.path
 
-			for jobs.Len() != 0 {
-				j := jobs.Pop()
-				i := j.i
+			tr.V("job_start").Printw("job start", "st", j.st, "path", j.path, "wait", j.wait, "more", jobs.jobs2.q)
 
-				tr.Printw("job start", "st", i, "path", j.path, "rest", jobs.l, "reached", j.reached, "of", merges[i])
+			for i < len(f.Code) {
+				id := f.Code[i]
+				x := p.Exprs[id]
 
-				if j.reached > 1 {
-					tr.Printw("block found", "st", i, "base", j.path[len(j.path)-1])
-				}
-
-				for i < len(f.Code) {
-					id := f.Code[i]
-					x := p.Exprs[id]
-
-					if l, ok := x.(ir.Label); ok {
-						visited.Set(l)
-					}
-
-					if b, ok := x.(ir.B); ok {
-						jobs.Push(job{
-							i:    labels[b.Label],
-							path: j.path,
-						})
-
+				if lab, ok := x.(ir.Label); ok && merges[i] > 0 {
+					if fwd.IsSet(i) {
 						break
 					}
 
-					b, ok := x.(ir.BCond)
-					if !ok {
-						i++
-						continue
+					fwd.Set(i)
+
+					var split branch
+
+					if l := len(path); l > 0 {
+						split = path[l-1]
+						path = path[:l-1]
 					}
 
-					jobs.Push(job{
-						i: labels[b.Label],
-						path: append(j.path[:len(j.path):len(j.path)], branch{
-							i:     i,
-							taken: bTaken,
-						}),
-					})
+					tr.V("job_merge").Printw("merge point", "i", i, "id", id, "lab", lab, "split", split, "path", path, "wait", j.wait, "inputs", merges[i])
 
-					jobs.Push(job{
-						i: i + 1,
-						path: append(j.path, branch{
-							i:     i,
-							taken: bNotTaken,
-						}),
-					})
+					i++
+					continue
+				}
 
+				if b, ok := x.(ir.B); ok {
+					next := labels[b.Label]
+					jobs.Push(job{st: next, path: path, wait: merges[next]})
 					break
 				}
 
-				tr.Printw("job done", "st", j.i, "i", i)
-			}
-		}
+				b, ok := x.(ir.BCond)
+				if !ok {
+					i++
+					continue
+				}
 
-		tr.Printw("visited", "visited", visited, "merges", merges)
+				if next := labels[b.Label]; true {
+					jobs.Push(job{
+						st:   next,
+						path: append(path[:len(path):len(path)], makeBranch(i, bTaken)),
+						wait: merges[next],
+					})
+				}
+
+				path = append(path, makeBranch(i, bNotTaken))
+				i++
+
+				continue
+			}
+
+			tr.V("job_done").Printw("job done", "st", j.st, "end", i, "path", path, "started", j.path)
+		}
 	}
 
 	return b, nil
 }
 
+func (js jobs2) Len() int      { return len(js.q) }
+func (js jobs2) Swap(i, j int) { js.q[i], js.q[j] = js.q[j], js.q[i] }
+func (js jobs2) Less(i, j int) bool {
+	if a, b := (js.q[i].wait == 0), (js.q[j].wait == 0); a && !b {
+		return true
+	} else if b && !a {
+		return false
+	}
+
+	return js.q[i].st < js.q[j].st
+}
+
 func (js *jobs) Push(j job) {
-	for i := 0; i < len(js.l); i++ {
-		j0 := js.l[i]
-		if j0.i != j.i {
+	tlog.V("jobs_push").Printw("job pushed", "st", j.st, "path", j.path, "wait", j.wait, "from", loc.Caller(1))
+
+	for i, j0 := range js.q {
+		if j0.st != j.st {
 			continue
 		}
 
-		tlog.Printw("merge jobs", "j0", j0, "j", j)
-
 		p := 0
 
-		for p < len(j0.path) && p < len(j.path) && j0.path[p].i == j.path[p].i {
-			j0.path[p].taken |= j.path[p].taken
+		for p < len(j.path) && p < len(j0.path) && j.path[p].Index() == j0.path[p].Index() {
+			j0.path[p] |= (j0.path[p] | j.path[p]) & bMask
 			p++
-
-			if j0.path[p-1].taken == (bNotTaken | bTaken) {
-				break
-			}
 		}
 
-		j0.path = j0.path[:p]
-		j0.reached++
+		//	tlog.Printw("jobs merged", "st", j.st, "path", j0.path[:p], "j0.path", j0.path, "j.path", j.path)
 
-		js.l[i] = j0
+		j0.path = j0.path[:p]
+		j0.wait--
+
+		js.q[i] = j0
 
 		heap.Fix(js.jobs2, i)
 
 		return
 	}
 
-	j.reached = 1
-	js.l = append(js.l, j)
+	if j.wait != 0 {
+		j.wait--
+	}
 
-	heap.Push(js.jobs2, j)
+	js.q = append(js.q, j)
+
+	heap.Fix(js.jobs2, len(js.q)-1)
 }
 
 func (js *jobs) Pop() job {
-	_ = heap.Pop(js.jobs2)
+	j := js.q[0]
 
-	l := len(js.l)
-	j := js.l[l-1]
-	js.l = js.l[:l-1]
+	n := js.Len() - 1
+	js.Swap(0, n)
+	js.q = js.q[:n]
+
+	heap.Fix(js.jobs2, 0)
 
 	return j
 }
 
-func (js jobs) Len() int { return len(js.l) }
-
-func (js jobs2) Len() int { return len(js.l) }
-func (js jobs2) Less(i, j int) bool {
-	ok := !(js.l[i].reached < js.merges[i]) && (js.l[j].reached < js.merges[j])
-	if ok {
-		return ok
-	}
-
-	return js.l[i].i < js.l[j].i
+func makeBranch(i, taken int) branch {
+	return branch(i<<2 | taken)
 }
-func (js jobs2) Swap(i, j int) { js.l[i], js.l[j] = js.l[j], js.l[i] }
-func (js jobs2) Push(x any)    {}
-func (js jobs2) Pop() any      { return nil }
+
+func (b branch) Index() int {
+	return int(b >> 2)
+}
+
+func (b branch) Taken() int {
+	return int(b & 3)
+}
 
 func (j job) TlogAppend(b []byte) []byte {
 	var e tlwire.Encoder
 
-	b = e.AppendMap(b, 2)
+	b = e.AppendMap(b, 3)
 
-	b = e.AppendKeyInt(b, "st", j.i)
-
-	b = e.AppendKey(b, "path")
-	b = e.AppendValue(b, j.path)
-
-	return b
-}
-
-func (br branch) TlogAppend(b []byte) []byte {
-	var e tlwire.Encoder
-
-	b = e.AppendMap(b, 1)
-
-	b = e.AppendInt(b, br.i)
-	b = e.AppendInt(b, br.taken)
+	b = e.AppendKeyInt(b, "st", j.st)
+	b = e.AppendKeyInt(b, "wait", j.wait)
+	b = e.AppendKeyInt(b, "path", len(j.path))
 
 	return b
 }
 
-func (m flatmap) TlogAppend(b []byte) []byte {
+func (b branch) TlogAppend(buf []byte) []byte {
 	var e tlwire.Encoder
 
-	b = e.AppendMap(b, -1)
+	var c byte
 
-	for i, v := range m {
-		if v == 0 {
-			continue
-		}
-
-		b = e.AppendInt(b, i)
-		b = e.AppendInt(b, v)
+	switch b.Taken() {
+	case bTaken:
+		c = '>'
+	case bNotTaken:
+		c = 'v'
+	case bTaken | bNotTaken:
+		c = '&'
+	case 0:
+		c = '_'
+	default:
+		c = '?'
 	}
 
-	b = e.AppendBreak(b)
-
-	return b
+	return e.AppendFormat(buf, "%d%c", b.Index(), c)
 }
