@@ -1,12 +1,13 @@
 package back
 
 import (
-	"container/heap"
 	"context"
 	"fmt"
 
+	"github.com/slowlang/slow/src/compiler/df"
 	"github.com/slowlang/slow/src/compiler/ir"
 	"github.com/slowlang/slow/src/compiler/set"
+	"nikand.dev/go/heap"
 	"tlog.app/go/errors"
 	"tlog.app/go/loc"
 	"tlog.app/go/tlog"
@@ -37,31 +38,19 @@ type (
 	Mov struct{ W, R Reg }
 
 	jobs struct {
-		jobs2
-	}
-
-	jobs2 struct {
-		heap.Interface
-		q []job
+		heap.Heap[job]
 	}
 
 	job struct {
 		st   int
-		path []branch
+		path []df.Pred
 
 		wait int
 	}
 
-	branch int // index << 2 | notTaken << 1 | taken << 0
+	path []df.Pred
 
 	flatmap []int
-)
-
-const (
-	bTaken = 1 << iota
-	bNotTaken
-
-	bMask = 1<<iota - 1
 )
 
 func New() *Compiler {
@@ -137,9 +126,10 @@ func (c *Compiler) compileFunc(ctx context.Context, b []byte, p *pkgContext, fn 
 		}
 	}
 
-	{ // merges
+	if true { // merges
 		labels := []int{}                    // label -> index
 		merges := make(flatmap, len(f.Code)) // label index -> branches
+		bpaths := make(map[ir.Expr][]df.Pred)
 
 		lastLabel := -1
 
@@ -157,17 +147,17 @@ func (c *Compiler) compileFunc(ctx context.Context, b []byte, p *pkgContext, fn 
 			}
 		}
 
-		var jobs jobs
+		jobs := jobs{Heap: heap.Heap[job]{Less: jobsLess}}
 		fwd := set.MakeBitmap(64)
 
-		jobs.Push(job{st: 0, path: []branch{}})
+		jobs.Push(job{st: 0})
 
 		for jobs.Len() != 0 {
 			j := jobs.Pop()
 			i := j.st
 			path := j.path
 
-			tr.V("job_start").Printw("job start", "st", j.st, "path", j.path, "wait", j.wait, "more", jobs.jobs2.q)
+			tr.V("job_start").Printw("job start", "st", j.st, "path", j.path, "wait", j.wait, "more", jobs.Data)
 
 			for i < len(f.Code) {
 				id := f.Code[i]
@@ -180,22 +170,41 @@ func (c *Compiler) compileFunc(ctx context.Context, b []byte, p *pkgContext, fn 
 
 					fwd.Set(i)
 
-					var split branch
+					var split df.Pred
 
 					if l := len(path); l > 0 {
 						split = path[l-1]
-						path = path[:l-1]
+						path = dup(path[:l-1])
 					}
 
 					tr.V("job_merge").Printw("merge point", "i", i, "id", id, "lab", lab, "split", split, "path", path, "wait", j.wait, "inputs", merges[i])
 
 					i++
+
+					{
+						id := f.Code[i]
+						x := p.Exprs[id]
+
+						p, ok := x.(ir.Phi)
+						if !ok {
+							continue
+						}
+
+						for _, br := range p {
+							tr.V("job_merge").Printw("merge from", "i", "?", "id", br.B, "path", bpaths[br.B])
+						}
+					}
+
 					continue
 				}
 
 				if b, ok := x.(ir.B); ok {
 					next := labels[b.Label]
 					jobs.Push(job{st: next, path: path, wait: merges[next]})
+
+					tr.V("job_b").Printw("job branch", "i", i, "id", id, "to", next, "path", path, "base", j.path)
+					bpaths[id] = dup(path)
+
 					break
 				}
 
@@ -206,14 +215,18 @@ func (c *Compiler) compileFunc(ctx context.Context, b []byte, p *pkgContext, fn 
 				}
 
 				if next := labels[b.Label]; true {
+					path := append(path[:len(path):len(path)], df.ToPred(b.Expr, df.PredHeld))
 					jobs.Push(job{
 						st:   next,
-						path: append(path[:len(path):len(path)], makeBranch(i, bTaken)),
+						path: path,
 						wait: merges[next],
 					})
+
+					tr.V("job_b").Printw("job branch", "to", next, "path", path, "base", j.path)
+					bpaths[id] = dup(path)
 				}
 
-				path = append(path, makeBranch(i, bNotTaken))
+				path = append(path, df.ToPred(b.Expr, df.PredNotHeld))
 				i++
 
 				continue
@@ -221,35 +234,94 @@ func (c *Compiler) compileFunc(ctx context.Context, b []byte, p *pkgContext, fn 
 
 			tr.V("job_done").Printw("job done", "st", j.st, "end", i, "path", path, "started", j.path)
 		}
+
+		code := make([]ir.Expr, 0, len(f.Code))
+		rename := make(map[ir.Expr]ir.Expr)
+		ren := func(x ir.Expr) ir.Expr {
+			for {
+				y, ok := rename[x]
+				if !ok {
+					return x
+				}
+
+				x = y
+			}
+		}
+
+		for i, id := range f.Code {
+			x := p.Exprs[id]
+
+			switch x := x.(type) {
+			case ir.Args, ir.Imm, ir.Add, ir.Cmp:
+				code = append(code, id)
+			case ir.Label, ir.B, ir.BCond:
+				// skip
+			case ir.Phi:
+				if len(x) == 1 {
+					y := ren(x[0].Expr)
+					z := p.alloc(df.Alias(y), p.EType[y])
+
+					code = append(code, z)
+					rename[id] = z
+
+					continue
+				}
+
+				var m df.Merge
+
+				for _, pb := range x {
+					y := ren(pb.Expr)
+
+					o := df.MergeOpt{
+						Expr: y,
+						Pred: bpaths[pb.B],
+					}
+
+					m = append(m, o)
+				}
+
+				tr.Printw("phi", "i", i, "id", id, "merge", m)
+
+				z := p.alloc(m, p.EType[id])
+
+				code = append(code, z)
+				rename[id] = z
+			default:
+				panic(x)
+			}
+		}
+
+		for i, id := range code {
+			x := p.Exprs[id]
+
+			tr.Printw("code df", "i", i, "id", id, "tp", p.EType[id], "typ", tlog.NextAsType, x, "val", x)
+		}
 	}
 
 	return b, nil
 }
 
-func (js jobs2) Len() int      { return len(js.q) }
-func (js jobs2) Swap(i, j int) { js.q[i], js.q[j] = js.q[j], js.q[i] }
-func (js jobs2) Less(i, j int) bool {
-	if a, b := (js.q[i].wait == 0), (js.q[j].wait == 0); a && !b {
+func jobsLess(d []job, i, j int) bool {
+	if a, b := (d[i].wait == 0), (d[j].wait == 0); a && !b {
 		return true
 	} else if b && !a {
 		return false
 	}
 
-	return js.q[i].st < js.q[j].st
+	return d[i].st < d[j].st
 }
 
 func (js *jobs) Push(j job) {
 	tlog.V("jobs_push").Printw("job pushed", "st", j.st, "path", j.path, "wait", j.wait, "from", loc.Caller(1))
 
-	for i, j0 := range js.q {
+	for i, j0 := range js.Data {
 		if j0.st != j.st {
 			continue
 		}
 
 		p := 0
 
-		for p < len(j.path) && p < len(j0.path) && j.path[p].Index() == j0.path[p].Index() {
-			j0.path[p] |= (j0.path[p] | j.path[p]) & bMask
+		for p < len(j.path) && p < len(j0.path) && j.path[p] == j0.path[p] {
 			p++
 		}
 
@@ -258,9 +330,9 @@ func (js *jobs) Push(j job) {
 		j0.path = j0.path[:p]
 		j0.wait--
 
-		js.q[i] = j0
+		js.Data[i] = j0
 
-		heap.Fix(js.jobs2, i)
+		js.Heap.Fix(i)
 
 		return
 	}
@@ -269,33 +341,7 @@ func (js *jobs) Push(j job) {
 		j.wait--
 	}
 
-	js.q = append(js.q, j)
-
-	heap.Fix(js.jobs2, len(js.q)-1)
-}
-
-func (js *jobs) Pop() job {
-	j := js.q[0]
-
-	n := js.Len() - 1
-	js.Swap(0, n)
-	js.q = js.q[:n]
-
-	heap.Fix(js.jobs2, 0)
-
-	return j
-}
-
-func makeBranch(i, taken int) branch {
-	return branch(i<<2 | taken)
-}
-
-func (b branch) Index() int {
-	return int(b >> 2)
-}
-
-func (b branch) Taken() int {
-	return int(b & 3)
+	js.Heap.Push(j)
 }
 
 func (j job) TlogAppend(b []byte) []byte {
@@ -310,23 +356,18 @@ func (j job) TlogAppend(b []byte) []byte {
 	return b
 }
 
-func (b branch) TlogAppend(buf []byte) []byte {
-	var e tlwire.Encoder
+func (p *pkgContext) id() ir.Expr {
+	return ir.Expr(len(p.Exprs))
+}
 
-	var c byte
+func (p *pkgContext) alloc(x any, tp ir.Type) ir.Expr {
+	id := p.id()
+	p.Exprs = append(p.Exprs, x)
+	p.EType = append(p.EType, tp)
 
-	switch b.Taken() {
-	case bTaken:
-		c = '>'
-	case bNotTaken:
-		c = 'v'
-	case bTaken | bNotTaken:
-		c = '&'
-	case 0:
-		c = '_'
-	default:
-		c = '?'
-	}
+	return id
+}
 
-	return e.AppendFormat(buf, "%d%c", b.Index(), c)
+func dup[T any](s []T) []T {
+	return append([]T{}, s...)
 }

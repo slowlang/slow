@@ -72,11 +72,6 @@ type (
 		Expr Expr
 	}
 
-	Pred struct {
-		Expr Expr
-		Cond Cond
-	}
-
 	//
 
 	Cmp struct {

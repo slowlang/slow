@@ -19,5 +19,6 @@ require (
 	golang.org/x/sys v0.17.0 // indirect
 	golang.org/x/term v0.17.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
+	nikand.dev/go/heap v0.0.0-20240423121825-4154ea1a4fbf // indirect
 	tlog.app/go/eazy v0.3.0 // indirect
 )
