@@ -492,8 +492,10 @@ func (c *Front) compileIf(ctx context.Context, prev *Scope, x *ast.IfStmt) (_ *S
 	scond := prev.nextScope(-1, 1, prev)
 	next := prev.nextScope(prev.label(), 0)
 
-	if x.Else == nil {
-		cond, err := c.compileCond(ctx, scond, x.Cond, true)
+	if x.Else == nil && tlog.If("if_rev") {
+		y := c.revCond(ctx, x.Cond)
+
+		cond, err := c.compileExpr(ctx, scond, y)
 		if err != nil {
 			return nil, errors.Wrap(err, "if cond")
 		}
@@ -514,7 +516,7 @@ func (c *Front) compileIf(ctx context.Context, prev *Scope, x *ast.IfStmt) (_ *S
 	}
 
 	for q := x; q != nil; {
-		cond, err := c.compileCond(ctx, scond, q.Cond, false)
+		cond, err := c.compileExpr(ctx, scond, q.Cond)
 		if err != nil {
 			return nil, errors.Wrap(err, "if cond")
 		}
@@ -654,7 +656,7 @@ func (c *Front) compileFor(ctx context.Context, prev *Scope, x *ast.ForStmt) (_ 
 	prev.branchTo(scond)
 
 	if x.Cond != nil {
-		cond, err := c.compileCond(ctx, scond, x.Cond, false)
+		cond, err := c.compileExpr(ctx, scond, x.Cond)
 		if err != nil {
 			return nil, errors.Wrap(err, "cond")
 		}
@@ -692,20 +694,16 @@ func (c *Front) compileLabeled(ctx context.Context, prev *Scope, x *ast.LabeledS
 	return s, nil
 }
 
-func (c *Front) compileCond(ctx context.Context, s *Scope, e ast.Expr, rev bool) (id ir.Expr, err error) {
-	if !rev {
-		return c.compileExpr(ctx, s, e)
-	}
-
+func (c *Front) revCond(ctx context.Context, e ast.Expr) ast.Expr {
 	switch e := e.(type) {
 	case *ast.BinaryExpr:
-		return c.compileExpr(ctx, s, &ast.BinaryExpr{
+		return &ast.BinaryExpr{
 			X:  e.X,
 			Y:  e.Y,
 			Op: revcond2(e.Op),
-		})
+		}
 	default:
-		return ir.Nil, errors.New("unsupported condition: %T", e)
+		panic(e)
 	}
 }
 
@@ -1294,6 +1292,10 @@ func revcond(x ir.Cond) ir.Cond {
 
 func revcond2(t token.Token) token.Token {
 	switch t {
+	case token.EQL:
+		return token.NEQ
+	case token.NEQ:
+		return token.EQL
 	case token.LSS:
 		return token.GEQ
 	case token.GTR:
